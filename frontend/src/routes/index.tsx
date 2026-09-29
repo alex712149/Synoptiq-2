@@ -79,7 +79,7 @@ function Page() {
             <span className="signal-chip">
               <i />
               {APP_DATA_MODE === "live"
-                ? "REAL PROTOTYPE · LIMITED HISTORY"
+                ? "REAL_12M HISTORICAL"
                 : "DEMO MODE · SYNTHETIC DATA"}
             </span>
             <h1>Synoptiq</h1>

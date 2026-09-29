@@ -1,0 +1,59 @@
+{
+  "source_provider": "Open-Meteo",
+  "models": {
+    "gfs": "NCEP GFS Global 0.11/0.25",
+    "ifs": "ECMWF IFS 0.25",
+    "aifs-single": "ECMWF AIFS 0.25 Single"
+  },
+  "aggregation_method": "openmeteo_representative_point_mean",
+  "precipitation_aggregation": "fixed_lead_hourly_sum",
+  "representative_points": {
+    "kerala_western_ghats": [
+      [
+        9.425,
+        75.525
+      ],
+      [
+        10.55,
+        76.15
+      ],
+      [
+        11.675,
+        76.775
+      ]
+    ],
+    "bay_of_bengal_east_coast": [
+      [
+        14.5,
+        81.875
+      ],
+      [
+        16.5,
+        83.75
+      ],
+      [
+        18.5,
+        85.625
+      ]
+    ],
+    "indo_gangetic_plains": [
+      [
+        25.625,
+        77.0
+      ],
+      [
+        27.25,
+        79.0
+      ],
+      [
+        28.875,
+        81.0
+      ]
+    ]
+  },
+  "requested_window": {
+    "start": "2025-02-26",
+    "end": "2025-03-02"
+  },
+  "missing_dates": {}
+}

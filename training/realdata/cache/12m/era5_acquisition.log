@@ -1,0 +1,14 @@
+  era5 2025-02 days=26-28: 9 zone-days
+  era5 2025-03 days=01-31: 93 zone-days
+  era5 2025-04 days=01-30: 90 zone-days
+  era5 2025-05 days=01-31: 93 zone-days
+  era5 2025-06 days=01-30: 90 zone-days
+  era5 2025-07 days=01-31: 93 zone-days
+  era5 2025-08 days=01-31: 93 zone-days
+  era5 2025-09 days=01-30: 90 zone-days
+  era5 2025-10 days=01-31: 93 zone-days
+  era5 2025-11 days=01-30: 90 zone-days
+  era5 2025-12 days=01-31: 93 zone-days
+  era5 2026-01 days=01-31: 93 zone-days
+  era5 2026-02 days=01-25: 75 zone-days
+done

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import (ACTIVE_METRICS_DIR, ACTIVE_MODEL_VERSION, CALIBRATION_DIR, LEAD_HOURS,
                         MANIFEST_PATH, MODELS, MODELS_DIR, PILOT_ZONES, RUNTIME_MODE,
-                        THRESHOLDS, VARIABLES)
+                        THRESHOLDS, VARIABLES, LIVE_FRESHNESS_MINUTES)
 from app.database import get_db
 from app.models_db import ForecastRow, GroundTruthRow, LiveForecast
 from app.pipeline import run_blend_pipeline
@@ -341,8 +341,48 @@ def system_status(db: Session = Depends(get_db)):
         provider["status"] == "LIVE" and provider["is_real"]
         for provider in providers.values()
     )
+    live_payload = latest_ingestion.payload if latest_ingestion and isinstance(latest_ingestion.payload, dict) else {}
+    live_states = live_payload.get("providers", {}) if isinstance(live_payload, dict) else {}
+    live_age_minutes = None
+    if latest_ingestion:
+        live_age_minutes = max(0, int((now - latest_ingestion.ingestion_time).total_seconds() / 60))
+    if live_states:
+        live_provider_count = 0
+        for model in MODELS:
+            state = live_states.get(model, {})
+            fresh = bool(
+                state.get("status") == "LIVE"
+                and live_age_minutes is not None
+                and live_age_minutes <= LIVE_FRESHNESS_MINUTES
+            )
+            if fresh:
+                live_provider_count += 1
+            providers[model].update({
+                "status": "LIVE" if fresh else ("STALE" if state.get("status") == "LIVE" else state.get("status", "UNAVAILABLE")),
+                "validation_result": "PASS" if fresh else state.get("reason", "live provider unavailable"),
+                "fresh": fresh,
+                "complete": bool(state.get("complete", False)),
+                "finite": bool(state.get("finite", False)),
+                "source": state.get("source"),
+                "source_model": state.get("source_model"),
+                "source_transport": state.get("source_transport"),
+                "retrieved_at": state.get("retrieved_at"),
+                "source_run_time": state.get("source_run_time"),
+                "run_time_basis": state.get("run_time_basis"),
+                "coverage": state.get("coverage", {}),
+                "fallback_used": bool(state.get("fallback_used", False)),
+                "age_minutes": live_age_minutes,
+                "reason": "fresh validated real provider cycle" if fresh else state.get("reason", "live cycle is stale"),
+            })
+    if live_provider_count == len(MODELS):
+        live_state = "REAL LIVE"
+    elif live_provider_count >= 2:
+        live_state = "DEGRADED REAL"
+    else:
+        live_state = "REAL INPUTS UNAVAILABLE"
     return {
         "mode": RUNTIME_MODE,
+        "live_state": live_state,
         "ready": bool(
             real_manifest
             and skill_dir.exists() and bust_dir.exists()
@@ -418,14 +458,12 @@ def lead_times():
 @router.get("/forecast/blend")
 def forecast_blend(region: str, variable: str, lead_hours: int,
                    valid_time: datetime | None = None, db: Session = Depends(get_db)):
-    _require_live_inputs(db)
     return _blend_public(db, region, variable, lead_hours, valid_time)
 
 
 @router.get("/weights/map")
 def weights_map(region: str, variable: str, season: str, regime: str,
                 db: Session = Depends(get_db)):
-    _require_live_inputs(db)
     points = []
     for lead in LEAD_HOURS:
         try:
@@ -510,7 +548,6 @@ def verification(region: str | None = None, variable: str | None = None):
 
 @router.get("/extreme/guidance")
 def extreme_guidance(region: str, lead_hours: int, db: Session = Depends(get_db)):
-    _require_live_inputs(db)
     guidance = []
     valid_time = None
     for variable in VARIABLES:

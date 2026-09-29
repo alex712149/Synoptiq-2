@@ -7,6 +7,8 @@ from app.config import DATA_DIR, DATABASE_ROLE, DATABASE_URL, DB_PATH, RUNTIME_M
 selected_url = "" if RUNTIME_MODE == "fake" else (
     TRAINING_DATABASE_URL if DATABASE_ROLE == "TRAINING" else DATABASE_URL
 )
+if DATABASE_ROLE == "TRAINING" and TRAINING_DATABASE_URL:
+    selected_url = TRAINING_DATABASE_URL
 if selected_url and RUNTIME_MODE == "real":
     database_url = make_url(selected_url)
     if database_url.get_backend_name() == "sqlite" and database_url.database not in (None, ":memory:"):

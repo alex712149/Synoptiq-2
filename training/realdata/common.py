@@ -72,7 +72,8 @@ LEAD_HOURS = [24, 48, 72, 96, 120]      # verification lead days 1..5
 STEPS = list(range(6, 145, 6))          # 6..144 by 6 h (covers day windows)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CACHE_DIR = Path(os.environ.get("SYNOPTIQ_CACHE", str(_PROJECT_ROOT / "data" / "real" / "cache"))).resolve()
+_DEFAULT_REAL_CACHE = _PROJECT_ROOT / "training" / "realdata" / "cache" / "12m"
+CACHE_DIR = Path(os.environ.get("SYNOPTIQ_CACHE", str(_DEFAULT_REAL_CACHE))).resolve()
 _FAKE_DATA_ROOT = (_PROJECT_ROOT / "data" / "fake").resolve()
 if CACHE_DIR == _FAKE_DATA_ROOT or _FAKE_DATA_ROOT in CACHE_DIR.parents:
     raise RuntimeError("Real-data ingestion cache cannot be placed under data/fake")
@@ -90,6 +91,9 @@ def forecast_cache_missing(raw, model: str, steps=None) -> dict:
         "aifs-single": {"t2m_c", "wind_ms", "tp_cum_m"},
     }[model]
     fields = set(getattr(raw, "columns", []))
+    if model in {"AIFS", "aifs-single"} and "precip_mm" in fields and "tp_cum_m" not in fields:
+        required_fields = {"t2m_c", "wind_ms", "precip_mm"}
+        expected_steps = set(LEAD_HOURS if steps is None else steps)
     missing_fields = sorted(required_fields - fields)
     if raw is None or raw.empty or not {"step", "zone"}.issubset(fields):
         return {"steps": sorted(expected_steps), "step_regions": [], "fields": missing_fields}

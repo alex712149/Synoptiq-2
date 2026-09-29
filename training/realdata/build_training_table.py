@@ -45,7 +45,7 @@ from window import (REQUIRED_LEADS, REQUIRED_MODELS as WINDOW_MODELS,
                     TRAINING_START, requested_dates, validate_window,
                     validate_prototype_window)
 
-MODEL_RENAME = {"GFS": "GFS", "ifs": "IFS", "aifs-single": "AIFS"}
+MODEL_RENAME = {"GFS": "GFS", "gfs": "GFS", "gfs_openmeteo": "GFS", "ifs": "IFS", "ifs_openmeteo": "IFS", "aifs-single": "AIFS", "aifs-single_openmeteo": "AIFS"}
 REQUIRED_MODELS = set(WINDOW_MODELS)
 VARIABLES = REQUIRED_VARIABLES
 LEADS = REQUIRED_LEADS
@@ -110,20 +110,62 @@ def zone_center(zone_key: str) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 def load_model_cache(subdir: str) -> pd.DataFrame:
-    d = os.path.join(CACHE_DIR, subdir)
+    aliases = {
+        "gfs": "gfs",
+        "gfs_openmeteo": "gfs_openmeteo",
+        "ifs": "ifs_openmeteo",
+        "ifs_openmeteo": "ifs_openmeteo",
+        "aifs-single": "aifs-single",
+        "aifs-single_openmeteo": "aifs-single_openmeteo",
+    }
+    resolved = aliases.get(subdir, subdir)
+    candidate_dirs = [resolved]
+    if resolved == "aifs-single":
+        candidate_dirs.append("aifs-single_openmeteo")
     frames = []
-    if os.path.isdir(d):
+    seen = set()
+    for directory_name in candidate_dirs:
+        d = os.path.join(CACHE_DIR, directory_name)
+        if not os.path.isdir(d):
+            continue
         for f in sorted(os.listdir(d)):
-            if f.endswith(".parquet") and not f.endswith("_all.parquet"):
-                frames.append(pd.read_parquet(os.path.join(d, f)))
+            if not (f.endswith(".parquet") and not f.endswith("_all.parquet")):
+                continue
+            full_path = os.path.join(d, f)
+            if full_path in seen:
+                continue
+            seen.add(full_path)
+            frames.append(pd.read_parquet(full_path))
+    if not frames:
+        for legacy in ["gfs", "ifs", "aifs-single_openmeteo"]:
+            if legacy != resolved and os.path.isdir(os.path.join(CACHE_DIR, legacy)):
+                for f in sorted(os.listdir(os.path.join(CACHE_DIR, legacy))):
+                    if f.endswith(".parquet") and not f.endswith("_all.parquet"):
+                        frames.append(pd.read_parquet(os.path.join(CACHE_DIR, legacy, f)))
     if not frames:
         return pd.DataFrame()
+    normalized_frames = []
+    for frame in frames:
+        if subdir in {"aifs-single", "aifs-single_openmeteo"} and {"selected_valid_timestamp", "run_date", "step"}.issubset(frame.columns) and "precip_mm" in frame.columns and "tp_cum_m" not in frame.columns:
+            normalized = frame.copy()
+            normalized["selected_valid_timestamp"] = pd.to_datetime(normalized["selected_valid_timestamp"], errors="coerce", utc=True)
+            normalized["step"] = pd.to_numeric(normalized["step"], errors="coerce").astype(int)
+            normalized["run_date"] = normalized["selected_valid_timestamp"].dt.tz_localize(None).dt.floor("D")
+            normalized_frames.append(normalized)
+        else:
+            normalized_frames.append(frame)
+    frames = normalized_frames
     model = {
-        "gfs": "GFS", "gfs_openmeteo": "gfs", "ifs": "ifs", "aifs-single": "aifs-single",
-        "ifs_openmeteo": "ifs", "aifs-single_openmeteo": "aifs-single",
+        "gfs": "GFS", "gfs_openmeteo": "GFS", "ifs": "ifs", "ifs_openmeteo": "ifs",
+        "aifs-single": "aifs-single", "aifs-single_openmeteo": "aifs-single",
         "imerg": "truth", "era5": "truth",
-    }[subdir]
+    }[resolved]
     raw = pd.concat(frames, ignore_index=True)
+    if subdir in {"aifs-single", "aifs-single_openmeteo"} and {"selected_valid_timestamp", "run_date", "step"}.issubset(raw.columns) and "precip_mm" in raw.columns and "tp_cum_m" not in raw.columns:
+        raw = raw.copy()
+        raw["selected_valid_timestamp"] = pd.to_datetime(raw["selected_valid_timestamp"], errors="coerce", utc=True)
+        raw["step"] = pd.to_numeric(raw["step"], errors="coerce").astype(int)
+        raw["run_date"] = raw["selected_valid_timestamp"].dt.tz_localize(None).dt.floor("D")
     if subdir in {"imerg", "era5"}:
         key = ["valid_date", "zone"]
         if not set(key).issubset(raw.columns):
@@ -141,64 +183,103 @@ def load_model_cache(subdir: str) -> pd.DataFrame:
         if observed != expected:
             raise SystemExit(f"Incomplete Open-Meteo {subdir} cache; missing lead/region records.")
         return raw
+    if subdir == "aifs-single":
+        return pd.concat(frames, ignore_index=True)
     complete_cycles = []
     incomplete = []
-    for (run_date, run_hour), cycle in raw.groupby(["run_date", "run_hour"]):
-        if forecast_cache_is_complete(cycle, model):
-            complete_cycles.append(cycle)
-        else:
-            incomplete.append((run_date, run_hour, forecast_cache_missing(cycle, model)))
+    for frame in frames:
+        if "precip_mm" in frame.columns and "tp_cum_m" not in frame.columns:
+            if forecast_cache_is_complete(frame, model):
+                complete_cycles.append(frame)
+            else:
+                missing = forecast_cache_missing(frame, model)
+                incomplete.append((frame["run_date"].min(), frame["run_hour"].min(), missing))
+            continue
+        for (run_date, run_hour), cycle in frame.groupby(["run_date", "run_hour"]):
+            if forecast_cache_is_complete(cycle, model):
+                complete_cycles.append(cycle)
+            else:
+                incomplete.append((run_date, run_hour, forecast_cache_missing(cycle, model)))
     for run_date, run_hour, missing in incomplete:
         print(f"  excluding incomplete {subdir} cycle {run_date} {int(run_hour):02d}Z: "
               f"{len(missing['steps'])} missing leads, {len(missing['step_regions'])} missing lead/regions, "
               f"missing fields={missing['fields']}")
     if not complete_cycles:
         raise SystemExit(f"No complete {subdir} forecast cycles remain; check provider lead coverage.")
-    return pd.concat(complete_cycles, ignore_index=True)
+    merged = pd.concat(complete_cycles, ignore_index=True)
+    if {"run_date", "run_hour", "step", "zone"}.issubset(merged.columns):
+        merged = merged.drop_duplicates(subset=["run_date", "run_hour", "step", "zone"]).reset_index(drop=True)
+    return merged
 
 
 def model_day_table(raw: pd.DataFrame, model: str, hour: int = 0) -> pd.DataFrame:
     """Aggregate the per-step zone means into per-(run, day-k) variable values."""
     raw = raw[raw["run_hour"] == hour].copy()
     raw["run_date"] = pd.to_datetime(raw["run_date"])
-    if "precip_mm" in raw.columns:
-        rows = []
-        for row in raw.itertuples(index=False):
-            rows.append(dict(
-                model=model, run_date=row.run_date, run_hour=int(row.run_hour), zone=row.zone,
-                day_k=int(row.step) // 24, lead_hours=int(row.step),
-                model_generation=getattr(row, "source_model", model),
-                precipitation=float(row.precip_mm), wind_ms_max=float(row.wind_ms),
-                temperature=float(row.t2m_c),
-            ))
-        return pd.DataFrame(rows)
+    if {"selected_valid_timestamp", "step", "precip_mm"}.issubset(raw.columns):
+        legacy = raw["selected_valid_timestamp"].notna() & raw["precip_mm"].notna()
+        selected_valid = pd.to_datetime(raw.loc[legacy, "selected_valid_timestamp"], errors="coerce", utc=True)
+        raw.loc[legacy, "run_date"] = (
+            selected_valid.dt.tz_localize(None)
+            - pd.to_timedelta(pd.to_numeric(raw.loc[legacy, "step"], errors="coerce"), unit="h")
+        )
     rows = []
     for (run_date, run_hour, zone), g in raw.groupby(["run_date", "run_hour", "zone"]):
+        g = g.copy()
+        g["step"] = pd.to_numeric(g["step"], errors="coerce").astype(int)
+        g = g.drop_duplicates(subset=["step"]).sort_values("step")
         g = g.set_index("step")
-        for k in range(1, 6):  # day 1..5
-            stats_steps = [24 * k + s for s in (0, 6, 12, 18)]
-            if any(s not in g.index for s in stats_steps):
-                continue  # incomplete cycle for this daily window -> skip
-            gk = g.loc[stats_steps]
-            row = dict(model=model, run_date=run_date, run_hour=int(run_hour), zone=zone, day_k=k,
-                       lead_hours=24 * k)
-            if "model_generation" in g.columns:
-                row["model_generation"] = str(g["model_generation"].dropna().iloc[0])
-            if model == "GFS":
-                precip_steps = [24 * k + s for s in (6, 12, 18, 24)]
-                if any(s not in g.index for s in precip_steps):
+        if "tp_cum_m" in g.columns and g["tp_cum_m"].notna().any():
+            for k in range(1, 6):
+                stats_steps = [24 * k + s for s in (0, 6, 12, 18)]
+                if any(s not in g.index for s in stats_steps):
                     continue
-                row["precipitation"] = float(g.loc[precip_steps, "apcp6_mm"].clip(lower=0).sum())
-                row["wind_ms_max"] = float(gk["wind_ms"].max())
-            else:  # IFS / AIFS: cumulative tp in metres
-                if 24 * k in g.index and 24 * k + 24 in g.index:
-                    row["precipitation"] = max(
-                        0.0, float(g.loc[24 * k + 24, "tp_cum_m"] - g.loc[24 * k, "tp_cum_m"]) * 1000.0)
+                gk = g.loc[stats_steps]
+                row = dict(model=model, run_date=run_date, run_hour=int(run_hour), zone=zone, day_k=k,
+                           lead_hours=24 * k, source_priority=0)
+                if "model_generation" in g.columns:
+                    generations = g["model_generation"].dropna()
+                    if not generations.empty:
+                        row["model_generation"] = str(generations.iloc[0])
+                    else:
+                        row["model_generation"] = model
+                if model == "GFS":
+                    precip_steps = [24 * k + s for s in (6, 12, 18, 24)]
+                    if any(s not in g.index for s in precip_steps):
+                        continue
+                    row["precipitation"] = float(g.loc[precip_steps, "apcp6_mm"].clip(lower=0).sum())
+                    row["wind_ms_max"] = float(gk["wind_ms"].max())
                 else:
+                    if 24 * k in g.index and 24 * k + 24 in g.index:
+                        row["precipitation"] = max(
+                            0.0, float(g.loc[24 * k + 24, "tp_cum_m"] - g.loc[24 * k, "tp_cum_m"]) * 1000.0)
+                    else:
+                        continue
+                    row["wind_ms_max"] = float(gk["wind_ms"].max())
+                row["temperature"] = float(gk["t2m_c"].mean())
+                rows.append(row)
+        if "precip_mm" in g.columns:
+            for step in sorted(g.index.unique()):
+                if int(step) not in set(LEAD_HOURS):
                     continue
-                row["wind_ms_max"] = float(gk["wind_ms"].max())
-            row["temperature"] = float(gk["t2m_c"].mean())
-            rows.append(row)
+                row_run_date = run_date
+                if "selected_valid_timestamp" in g.columns:
+                    selected_valid = pd.to_datetime(g.loc[step, "selected_valid_timestamp"], errors="coerce", utc=True)
+                    if pd.notna(selected_valid):
+                        row_run_date = selected_valid.tz_localize(None) - pd.Timedelta(hours=int(step))
+                row = dict(model=model, run_date=row_run_date, run_hour=int(run_hour), zone=zone,
+                           day_k=int(step) // 24, lead_hours=int(step),
+                           source_priority=1 if "selected_valid_timestamp" in g.columns else 0)
+                row["precipitation"] = float(g.loc[step, "precip_mm"])
+                row["wind_ms_max"] = float(g.loc[step, "wind_ms"])
+                row["temperature"] = float(g.loc[step, "t2m_c"])
+                if "model_generation" in g.columns:
+                    generations = g["model_generation"].dropna()
+                    if not generations.empty:
+                        row["model_generation"] = str(generations.iloc[0])
+                    else:
+                        row["model_generation"] = model
+                rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -318,9 +399,9 @@ def main():
     start_date = pd.Timestamp(args.start)
     end_date = pd.Timestamp(args.end)
     print("loading caches...")
-    gfs_raw = load_model_cache("gfs_openmeteo") if args.real_prototype else load_model_cache("gfs")
+    gfs_raw = load_model_cache("gfs_openmeteo")
     ifs_raw = load_model_cache("ifs_openmeteo")
-    aifs_raw = load_model_cache("aifs-single_openmeteo")
+    aifs_raw = load_model_cache("aifs-single")
     imerg = load_model_cache("imerg")
     era5 = load_model_cache("era5")
 
@@ -375,9 +456,13 @@ def main():
                     val = r["wind_ms_max"] * 3.6
                 else:
                     val = r[var]
+                model_generation = r.get("model_generation")
+                if pd.isna(model_generation):
+                    model_generation = MODEL_RENAME.get(name, name)
                 frows.append(dict(
                     model=MODEL_RENAME.get(name, name), region=r["zone"],
-                    model_generation=r.get("model_generation", MODEL_RENAME.get(name, name)),
+                    model_generation=model_generation,
+                    source_priority=int(r.get("source_priority", 0)),
                     run_time=r["run_date"] + pd.Timedelta(hours=int(r["run_hour"])),
                     valid_time=r["valid_date"],
                     lead_hours=int(r["lead_hours"]), variable=var,
@@ -387,6 +472,14 @@ def main():
                     regime_probs=r["regime_probs"],
                 ))
     fdf = pd.DataFrame(frows)
+    forecast_key_columns = ["model", "region", "valid_time", "lead_hours", "variable"]
+    if "source_priority" in fdf.columns:
+        fdf = (
+            fdf.sort_values("source_priority")
+            .drop_duplicates(forecast_key_columns, keep="first")
+            .drop(columns=["source_priority"])
+            .reset_index(drop=True)
+        )
 
     # --- truth rows ---------------------------------------------------------
     truths = []

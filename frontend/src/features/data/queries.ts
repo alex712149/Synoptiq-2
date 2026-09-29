@@ -30,12 +30,14 @@ export const systemStatusQuery = queryOptions({
   queryKey: ["system-status"],
   queryFn: () => choose(liveApi.systemStatus, fixtureApi.systemStatus),
   staleTime: 30_000,
+  refetchInterval: 30_000,
   retry: 1,
 });
 export const blendQuery = (r: RegionCode, v: VariableName, l: number) =>
   queryOptions({
     queryKey: ["blend", r, v, l],
     queryFn: () => (DEMO_MODE ? fixtureApi.blend(r, v, l) : liveApi.blend(r, v, l)),
+    refetchInterval: 60_000,
     retry: 1,
   });
 export const weightsQuery = (r: RegionCode, v: VariableName, s: Season, g: Regime) =>

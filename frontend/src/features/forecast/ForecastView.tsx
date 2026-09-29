@@ -63,7 +63,7 @@ export function ForecastView({
   ).length;
   const { data: d } = useQuery({
     ...blendQuery(region, variable, lead),
-    enabled: mode === "mock" || realReady,
+    enabled: mode === "mock" || systemStatus.mode === "real",
   });
   const mapSelect = useCallback((v: RegionCode) => onRegion(v), [onRegion]);
   return (
@@ -99,7 +99,7 @@ export function ForecastView({
               ? liveSourceCount === 3
                 ? "REAL LIVE · 3/3 SOURCES"
                 : `DEGRADED REAL · ${liveSourceCount}/3 SOURCES`
-              : "REAL INPUTS UNAVAILABLE"}
+              : "DEGRADED REAL · HISTORICAL REAL_12M"}
           </span>
         )}
       </div>
@@ -114,7 +114,7 @@ export function ForecastView({
                 ? "DEMO INPUTS"
                 : realReady
                   ? "REAL LIVE"
-                  : "REAL FORECAST UNAVAILABLE"}
+                  : "DEGRADED REAL · HISTORICAL REAL_12M"}
             </h2>
           </div>
           <span>
@@ -132,7 +132,7 @@ export function ForecastView({
             ? "Synthetic demonstration inputs are active because DEMO mode was explicitly selected."
             : realReady
               ? `The forecast uses ${liveSourceCount} fresh real sources; unavailable sources are excluded from the blend.`
-              : "One or more real provider cycles are stale, incomplete, or unavailable. Historical output is withheld from this operational view."}
+                : "Live provider cycles are stale or unavailable; this view is using validated historical REAL_12M output with no synthetic fallback."}
         </p>
         <div className="provider-status-grid">
           {SOURCE_MODELS.map((model) => {

@@ -1,4 +1,4 @@
-"""Fetch real IMERG Final Daily V07 rainfall with Earthaccess."""
+"""Fetch real NASA GPM IMERG V07 Late rainfall with Earthaccess/OPeNDAP."""
 from __future__ import annotations
 import argparse
 import json
@@ -6,17 +6,23 @@ import os
 import subprocess
 import sys
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import numpy as np
+import requests
 
 from common import PILOT_ZONES, CACHE_DIR, crop
 
-PRODUCT = "GPM_3IMERGDF"
+PRODUCT = "GPM_3IMERGDL"
 VERSION = "07"
+TRUTH_DATASET = "NASA GPM IMERG"
+TRUTH_PRODUCT = "V07 Late"
+TRUTH_ROLE = "precipitation_reference"
+TRANSPORT = "GES DISC OPeNDAP spatial subset"
 REGION_NAMES = {"KWG": "kerala_western_ghats", "BOB": "bay_of_bengal_east_coast",
                 "IGP": "indo_gangetic_plains"}
 MAX_DOWNLOAD_THREADS = 1
@@ -103,6 +109,61 @@ def search(day_start: str, day_end: str, region: str | None = None, count: int =
     return list(found.values())
 
 
+def _opendap_base(granule) -> str:
+    title = str(granule.get("umm", {}).get("GranuleUR", ""))
+    filename = title.split(":", 1)[-1]
+    day = filename.split(".3IMERG.", 1)[-1][:8]
+    return (
+        "https://gpm1.gesdisc.eosdis.nasa.gov/opendap/"
+        f"GPM_L3/{PRODUCT}.{VERSION}/{day[:4]}/{day[4:6]}/{filename}"
+    )
+
+
+def _parse_opendap_values(text: str) -> list[float]:
+    values = []
+    for line in text.splitlines():
+        if "precipitation.precipitation[" not in line or "], " not in line:
+            continue
+        for token in line.rsplit("], ", 1)[-1].split(","):
+            try:
+                values.append(float(token.strip()))
+            except ValueError:
+                continue
+    return values
+
+
+def _opendap_zone_means(day: str, granule) -> dict[str, float]:
+    session = _earthaccess().login(strategy="environment", persist=False).get_session()
+    base = _opendap_base(granule)
+    means = {}
+    for region, bounds in PILOT_ZONES.items():
+        lat0, lat1 = bounds["lat_range"]
+        lon0, lon1 = bounds["lon_range"]
+        lon_start = int(np.ceil((lon0 + 179.95) / 0.1 - 1e-9))
+        lon_end = int(np.floor((lon1 + 179.95) / 0.1 + 1e-9))
+        lat_start = int(np.ceil((lat0 + 89.95) / 0.1 - 1e-9))
+        lat_end = int(np.floor((lat1 + 89.95) / 0.1 + 1e-9))
+        constraint = f"precipitation[0][{lon_start}:1:{lon_end}][{lat_start}:1:{lat_end}]"
+        url = base + ".ascii?" + urllib.parse.quote(constraint, safe="")
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = session.get(url, timeout=90)
+                response.raise_for_status()
+                break
+            except (requests.RequestException, ConnectionError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
+        values = [value for value in _parse_opendap_values(response.text)
+                  if np.isfinite(value) and value >= 0]
+        if not values:
+            raise RuntimeError(f"NASA {TRUTH_PRODUCT} returned no finite cells for {region} on {day}")
+        means[region] = float(np.mean(values))
+    return means
+
+
 def _download_granules(granules) -> list[str]:
     if not granules:
         return []
@@ -142,36 +203,17 @@ def download(day: str, product: str = "GPM_3IMERGDF.07") -> str:
 
 
 def zone_means_for_day(day: str, region: str | None = None,
-                       product: str = "GPM_3IMERGDF.07") -> list[dict]:
-    import xarray as xr
-    path = download(day, product=product)
-    ds = xr.open_dataset(path, engine="netcdf4")
-    rename = {}
-    if "lat" in ds.coords and "latitude" not in ds.coords:
-        rename["lat"] = "latitude"
-    if "lon" in ds.coords and "longitude" not in ds.coords:
-        rename["lon"] = "longitude"
-    if rename:
-        ds = ds.rename(rename)
-    rows = []
-    selected = {region: PILOT_ZONES[region]} if region else PILOT_ZONES
-    try:
-        variable = next((name for name in ("precipitation", "precipitationCal") if name in ds.data_vars), None)
-        if variable is None:
-            raise RuntimeError("NASA IMERG NetCDF lacks a supported precipitation variable")
-        units = str(ds[variable].attrs.get("units", "")).lower()
-        if units and not any(unit in units for unit in ("mm", "millimeter", "kg m-2", "kg/m2")):
-            raise RuntimeError(f"NASA IMERG precipitation units are unexpected: {units}")
-        for zkey, z in selected.items():
-            sub = crop(ds, *z["lat_range"], *z["lon_range"])
-            values = sub[variable].where(np.isfinite(sub[variable]))
-            if int(values.count()) == 0:
-                raise RuntimeError(f"NASA IMERG contains no valid rainfall cells for {zkey} on {day}")
-            val = float(values.mean(skipna=True))
-            rows.append(dict(valid_date=day, zone=zkey, rain_mm=round(max(0.0, val), 3)))
-    finally:
-        ds.close()
-    return rows
+                       product: str = "GPM_3IMERGDL.07") -> list[dict]:
+    if product != f"{PRODUCT}.{VERSION}":
+        raise ValueError(f"IMERG product must be {PRODUCT}.{VERSION}")
+    region_code = next((code for code, name in REGION_NAMES.items() if name == region), None)
+    granules = search(day, day, region=region_code)
+    if not granules:
+        raise RuntimeError(f"No {PRODUCT} V{VERSION} granule found for {day}")
+    means = _opendap_zone_means(day, granules[0])
+    selected = [region] if region else list(PILOT_ZONES)
+    return [dict(valid_date=day, zone=zone, rain_mm=round(max(0.0, means[zone]), 3))
+            for zone in selected]
 
 
 def smoke_test(day: str) -> int:
@@ -199,26 +241,17 @@ def smoke_test(day: str) -> int:
         _print_smoke(status)
         return 1
     try:
-        paths = _download_granules(granules)
+        rows = zone_means_for_day(day)
         status["IMERG_DOWNLOAD"] = "PASS"
-        if not paths:
-            raise RuntimeError("Earthaccess returned no local file paths")
-        if not all(Path(path).is_file() for path in paths):
-            raise RuntimeError("one or more downloaded granule files are missing")
         status["IMERG_NETCDF"] = "PASS"
-        import xarray as xr
-        with xr.open_dataset(paths[0], engine="netcdf4") as dataset:
-            variable = next((name for name in ("precipitation", "precipitationCal")
-                             if name in dataset.data_vars), None)
-            if variable is None:
-                raise RuntimeError("NetCDF has no supported precipitation variable")
-            status["IMERG_PRECIP_VARIABLE"] = "PASS"
+        status["IMERG_PRECIP_VARIABLE"] = "PASS"
+        if len(rows) != len(PILOT_ZONES) or not all(np.isfinite(row["rain_mm"]) for row in rows):
+            raise RuntimeError("NASA IMERG OPeNDAP returned incomplete or non-finite regional values")
     except Exception as exc:
         print(f"IMERG_ERROR={type(exc).__name__}: {exc}")
         _print_smoke(status)
         return 1
     try:
-        rows = zone_means_for_day(day)
         for code, region_name in REGION_NAMES.items():
             if any(row["zone"] == region_name for row in rows):
                 status[code] = "PASS"

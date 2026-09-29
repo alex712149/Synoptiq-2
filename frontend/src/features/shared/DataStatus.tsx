@@ -11,7 +11,7 @@ export function DataStatus({
       className={`status-pill ${mode === "live" ? "status-live" : "status-mock"}`}
       title={
         mode === "live"
-          ? "Real prototype data; request availability is shown by each page"
+          ? "Validated REAL_12M historical data; live freshness is shown by each page"
           : "Using synthetic fixtures in explicit DEMO mode"
       }
     >
@@ -22,7 +22,7 @@ export function DataStatus({
             ? "Real"
             : "Demo"
           : mode === "live"
-            ? "Real prototype · limited history"
+            ? "REAL_12M historical"
             : "Demo mode · synthetic data"}
       </span>
     </div>

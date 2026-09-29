@@ -117,11 +117,23 @@ class ProviderStatusResponse(BaseModel):
     timestamp: Optional[datetime] = None
     reason: str
     is_real: bool
+    fresh: bool = False
+    complete: bool = False
+    finite: bool = False
+    source: Optional[str] = None
+    source_model: Optional[str] = None
+    source_transport: Optional[str] = None
+    retrieved_at: Optional[datetime] = None
+    source_run_time: Optional[datetime] = None
+    run_time_basis: Optional[str] = None
+    coverage: dict[str, Any] = {}
+    fallback_used: bool = False
 
 
 class SystemStatusResponse(BaseModel):
     mode: Literal["real", "fake"]
     ready: bool
+    live_state: str = "REAL INPUTS UNAVAILABLE"
     active_model_version: Optional[str] = None
     training_period: Any = None
     last_successful_ingestion_time: Optional[datetime] = None

@@ -34,10 +34,10 @@ def get_runtime_mode() -> str:
 
 APP_MODE = "LIVE" if RUNTIME_MODE == "real" else "DEMO"
 DATA_DIR = PROJECT_ROOT / "data" / RUNTIME_MODE
-MODELS_DIR = PROJECT_ROOT / "models" / RUNTIME_MODE
-ARTIFACTS_DIR = ARTIFACTS_BASE_DIR / RUNTIME_MODE
-CALIBRATION_DIR = ARTIFACTS_DIR / "calibration"
-METRICS_DIR = ARTIFACTS_DIR / "metrics"
+ARTIFACTS_DIR = Path(os.getenv("SYNOPTIQ_ARTIFACTS_DIR", str(ARTIFACTS_BASE_DIR / RUNTIME_MODE))).resolve()
+MODELS_DIR = Path(os.getenv("SYNOPTIQ_MODELS_DIR", str(PROJECT_ROOT / "models" / RUNTIME_MODE))).resolve()
+CALIBRATION_DIR = Path(os.getenv("SYNOPTIQ_CALIBRATION_DIR", str(ARTIFACTS_DIR / "calibration"))).resolve()
+METRICS_DIR = Path(os.getenv("SYNOPTIQ_METRICS_DIR", str(ARTIFACTS_DIR / "metrics"))).resolve()
 PROTOTYPE_DIR = ARTIFACTS_DIR / "prototype"
 MANIFESTS_DIR = ARTIFACTS_DIR / "manifests"
 DB_PATH = PROJECT_ROOT / "data" / "fake" / "demo" / "synoptiq.db"
@@ -48,6 +48,9 @@ ACTIVE_MODEL_VERSION = (
     os.getenv("SYNOPTIQ_MODEL_VERSION", os.getenv("MODEL_VERSION", "")).strip()
     if RUNTIME_MODE == "real" else ""
 )
+LIVE_REFRESH_MINUTES = int(os.getenv("SYNOPTIQ_LIVE_REFRESH_MINUTES", "15"))
+LIVE_FRESHNESS_MINUTES = int(os.getenv("SYNOPTIQ_LIVE_FRESHNESS_MINUTES", "45"))
+LIVE_DATA_DIR = Path(os.getenv("SYNOPTIQ_LIVE_DATA_DIR", str(PROJECT_ROOT / "data" / "real" / "live"))).resolve()
 ECMWF_API_URL = os.getenv("ECMWF_API_URL", "https://api.ecmwf.int/v1").strip()
 ACTIVE_METRICS_DIR = METRICS_DIR / ACTIVE_MODEL_VERSION if RUNTIME_MODE == "real" and ACTIVE_MODEL_VERSION else METRICS_DIR
 MANIFEST_PATH = (
@@ -65,7 +68,7 @@ if DATABASE_ROLE == "TRAINING" and DATABASE_URL and TRAINING_DATABASE_URL == DAT
 if RUNTIME_MODE == "fake" and DATABASE_ROLE == "TRAINING":
     raise RuntimeError("Fake mode cannot use the training database role")
 
-for _directory in (ARTIFACTS_DIR, MODELS_DIR, DATA_DIR, DB_PATH.parent):
+for _directory in (ARTIFACTS_DIR, MODELS_DIR, DATA_DIR, DB_PATH.parent, LIVE_DATA_DIR):
     _directory.mkdir(exist_ok=True, parents=True)
 
 MODELS = ["GFS", "IFS", "AIFS"]  # candidate forecast sources

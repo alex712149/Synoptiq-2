@@ -1,0 +1,30 @@
+{
+  "requested_date_range": {
+    "start": "2025-02-26",
+    "end": "2026-02-25"
+  },
+  "actual_complete_date_range": {
+    "start": "2025-02-26",
+    "end": "2026-02-25"
+  },
+  "longest_complete_common_contiguous_interval": {
+    "start": "2025-02-26",
+    "end": "2026-02-25"
+  },
+  "missing_dates": [],
+  "missing_coverage": {},
+  "missing_providers": [],
+  "row_counts": {
+    "forecasts": 49275,
+    "truth": 3285
+  },
+  "duplicate_counts": {
+    "forecasts": 0,
+    "truth": 0
+  },
+  "null_counts": {
+    "forecasts": 0,
+    "truth": 0
+  },
+  "complete_date_count": 365
+}

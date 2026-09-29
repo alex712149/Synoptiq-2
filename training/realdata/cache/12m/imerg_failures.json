@@ -1,0 +1,4 @@
+{
+  "2025-10-18": "worker exit 1: essions.py\", line 784, in send\n    r = adapter.send(request, **kwargs)\n  File \"D:\\SIH2026\\Synoptiq\\.venv\\Lib\\site-packages\\requests\\adapters.py\", line 711, in send\n    raise ConnectionError(err, request=request)\nrequests.exceptions.ConnectionError: ('Connection aborted.', ConnectionAbortedError(10053, 'An established connection was aborted by the software in your host machine', None, 10053, None))",
+  "2025-10-17": "worker exit 1: \\Synoptiq\\.venv\\Lib\\site-packages\\requests\\models.py\", line 939, in generate\n    raise ChunkedEncodingError(e)\nrequests.exceptions.ChunkedEncodingError: (\"Connection broken: ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)\", ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None))"
+}

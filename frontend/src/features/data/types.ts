@@ -163,10 +163,22 @@ export interface ProviderStatus {
   timestamp: string | null;
   reason: string;
   is_real: boolean;
+  fresh?: boolean;
+  complete?: boolean;
+  finite?: boolean;
+  source?: string | null;
+  source_model?: string | null;
+  source_transport?: string | null;
+  retrieved_at?: string | null;
+  source_run_time?: string | null;
+  run_time_basis?: string | null;
+  coverage?: Record<string, unknown>;
+  fallback_used?: boolean;
 }
 export interface SystemStatusResponse {
   mode: "real" | "fake";
   ready: boolean;
+  live_state?: "REAL LIVE" | "DEGRADED REAL" | "REAL INPUTS UNAVAILABLE";
   active_model_version: string | null;
   last_successful_ingestion_time: string | null;
   providers: Record<ModelName, ProviderStatus>;
