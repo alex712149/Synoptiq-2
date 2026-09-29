@@ -169,11 +169,19 @@ def _aggregate_archive_rows(model: str, raw_rows: list[dict], retrieved_at: date
                     _interpolate_step(indexed, "wind_ms", source_offset + offset)
                     for offset in (0, 6, 12, 18)
                 ]
+                native_unit = str(indexed["tp_native_unit"].dropna().iloc[0])
+                step_type = str(indexed["tp_step_type"].dropna().iloc[0])
+                if native_unit != "kg m**-2" or step_type != "accum":
+                    raise RuntimeError(
+                        f"{model} precipitation semantics invalid: unit={native_unit!r} step_type={step_type!r}"
+                    )
                 precipitation_start = _interpolate_step(indexed, "tp_cum_m", source_offset)
                 precipitation_end = _interpolate_step(indexed, "tp_cum_m", source_offset + 24)
                 temperature_value = float(np.mean(temperatures))
                 wind_value = max(winds) * 3.6
-                precipitation = max(0.0, precipitation_end - precipitation_start) * 1000.0
+                # ECMWF GRIB metadata defines tp as kg m^-2, numerically equal to mm.
+                # The field is cumulative, so only the 24-hour difference is used.
+                precipitation = max(0.0, precipitation_end - precipitation_start)
             else:
                 steps = [lead + offset for offset in (0, 6, 12, 18)]
                 if any(step not in indexed.index for step in steps):
@@ -189,7 +197,13 @@ def _aggregate_archive_rows(model: str, raw_rows: list[dict], retrieved_at: date
                 else:
                     if lead + 24 not in indexed.index:
                         raise RuntimeError(f"fallback missing {zone} cumulative precipitation lead {lead}")
-                    precipitation = max(0.0, float(indexed.loc[lead + 24, "tp_cum_m"] - indexed.loc[lead, "tp_cum_m"]) * 1000.0)
+                    native_unit = str(indexed["tp_native_unit"].dropna().iloc[0])
+                    step_type = str(indexed["tp_step_type"].dropna().iloc[0])
+                    if native_unit != "kg m**-2" or step_type != "accum":
+                        raise RuntimeError(
+                            f"{model} precipitation semantics invalid: unit={native_unit!r} step_type={step_type!r}"
+                        )
+                    precipitation = max(0.0, float(indexed.loc[lead + 24, "tp_cum_m"] - indexed.loc[lead, "tp_cum_m"]))
                 valid_time = cycle_time + timedelta(hours=lead)
             common = {
                 "model": model, "region": zone, "valid_time": valid_time.replace(tzinfo=None),
@@ -201,6 +215,11 @@ def _aggregate_archive_rows(model: str, raw_rows: list[dict], retrieved_at: date
                 "retrieved_at_utc": retrieved_at.isoformat(), "source_provider": provider,
                 "source_model": source_model, "source_transport": transport,
                 "source_run_time": cycle_time.isoformat(), "run_time_basis": "model_run_time",
+                "native_precip_field": "tp" if model in {"IFS", "AIFS"} else "apcp6",
+                "tp_native_unit": "kg m**-2" if model in {"IFS", "AIFS"} else "kg m**-2",
+                "tp_step_type": "accum" if model in {"IFS", "AIFS"} else "incremental",
+                "precip_accumulation": "cumulative_difference_24h" if model in {"IFS", "AIFS"} else "incremental_6h_sum_24h",
+                "precip_conversion": "1 kg m^-2 = 1 mm" if model in {"IFS", "AIFS"} else "1 kg m^-2 = 1 mm",
             }
             rows.extend([
                 {**common, "variable": "temperature", "forecast_value": temperature_value},
@@ -240,9 +259,33 @@ def validate_rows(model: str, rows: list[dict], now: datetime) -> dict:
     future = bool(not frame.empty and (pd.to_datetime(frame["valid_time"]) > now.replace(tzinfo=None)).all())
     complete = observed == expected and len(frame) == len(expected)
     duplicate = int(frame.duplicated(["model", "region", "variable", "lead_hours", "valid_time"]).sum()) if not frame.empty else 0
-    if not complete or not finite or not future or duplicate:
-        raise RuntimeError(f"{model} invalid live cycle: complete={complete} finite={finite} future={future} duplicates={duplicate}")
-    return {"rows": len(frame), "regions": len(set(frame["region"])), "variables": len(set(frame["variable"])), "leads": len(set(frame["lead_hours"])), "finite": finite, "complete": complete, "future": future}
+    semantic_valid = True
+    semantic_reason = "provider values have verified units, ranges, and accumulation semantics"
+    if not frame.empty:
+        precipitation = frame.loc[frame["variable"] == "precipitation", "forecast_value"].to_numpy(dtype=float)
+        temperature = frame.loc[frame["variable"] == "temperature", "forecast_value"].to_numpy(dtype=float)
+        wind = frame.loc[frame["variable"] == "wind_speed", "forecast_value"].to_numpy(dtype=float)
+        if model in {"IFS", "AIFS"}:
+            native_units = set(frame.get("tp_native_unit", pd.Series(dtype=str)).dropna().astype(str))
+            step_types = set(frame.get("tp_step_type", pd.Series(dtype=str)).dropna().astype(str))
+            if native_units and native_units != {"kg m**-2"}:
+                semantic_valid = False
+                semantic_reason = f"ECMWF precipitation native unit is not kg m**-2: {sorted(native_units)}"
+            elif step_types and step_types != {"accum"}:
+                semantic_valid = False
+                semantic_reason = f"ECMWF precipitation step type is not cumulative accumulation: {sorted(step_types)}"
+        if semantic_valid and (np.any(precipitation < 0) or np.any(precipitation > 1000)):
+            semantic_valid = False
+            semantic_reason = "precipitation value failed physical semantic range 0..1000 mm/24h"
+        elif semantic_valid and (np.any(temperature < -90) or np.any(temperature > 65)):
+            semantic_valid = False
+            semantic_reason = "temperature value failed physical semantic range -90..65 deg_C"
+        elif semantic_valid and (np.any(wind < 0) or np.any(wind > 150)):
+            semantic_valid = False
+            semantic_reason = "wind value failed physical semantic range 0..150 km/h"
+    if not complete or not finite or not future or duplicate or not semantic_valid:
+        raise RuntimeError(f"{model} invalid live cycle: complete={complete} finite={finite} future={future} duplicates={duplicate} semantic_valid={semantic_valid} reason={semantic_reason}")
+    return {"rows": len(frame), "regions": len(set(frame["region"])), "variables": len(set(frame["variable"])), "leads": len(set(frame["lead_hours"])), "finite": finite, "complete": complete, "future": future, "semantic_valid": semantic_valid, "semantic_reason": semantic_reason}
 
 
 def fetch_provider(model: str, now: datetime) -> tuple[list[dict], dict]:
@@ -256,7 +299,7 @@ def fetch_provider(model: str, now: datetime) -> tuple[list[dict], dict]:
             rows = _live_rows(model, now)
             coverage = validate_rows(model, rows, now)
             source_provider = rows[0]["source_provider"]
-            state = {"status": "LIVE", "fresh": True, "complete": True, "finite": True, "source": source_provider, "source_model": rows[0]["source_model"], "source_transport": rows[0]["source_transport"], "retrieved_at": now.isoformat(), "source_run_time": None, "run_time_basis": "retrieval_time", "coverage": coverage, "fallback_used": fallback_used, "reason": "complete future real forecast cycle", "latency_seconds": round(time.monotonic() - started, 3)}
+            state = {"status": "LIVE", "fresh": True, "complete": True, "finite": True, "semantic_valid": bool(coverage.get("semantic_valid", False)), "source": source_provider, "source_model": rows[0]["source_model"], "source_transport": rows[0]["source_transport"], "retrieved_at": now.isoformat(), "source_run_time": None, "run_time_basis": "retrieval_time", "coverage": coverage, "fallback_used": fallback_used, "reason": "complete future real forecast cycle", "latency_seconds": round(time.monotonic() - started, 3)}
             return rows, state
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -273,12 +316,12 @@ def fetch_provider(model: str, now: datetime) -> tuple[list[dict], dict]:
         )
         max_source_age = timedelta(hours={"GFS": 10, "IFS": 14, "AIFS": 20}[model])
         fresh = timedelta(0) <= source_age <= max_source_age
-        state = {"status": "LIVE" if fresh else "STALE", "fresh": fresh, "complete": True, "finite": True, "source": rows[0]["source_provider"], "source_model": rows[0]["source_model"], "model_generation": rows[0].get("model_generation"), "source_transport": rows[0]["source_transport"], "retrieved_at": now.isoformat(), "source_run_time": source_run_time, "run_time_basis": rows[0].get("run_time_basis", "retrieval_time"), "coverage": coverage, "fallback_used": True, "reason": "complete fresh real source cycle" if fresh else "complete real source cycle exceeds its model-cycle freshness window", "latency_seconds": round(time.monotonic() - started, 3)}
+        state = {"status": "LIVE" if fresh else "STALE", "fresh": fresh, "complete": True, "finite": True, "semantic_valid": bool(coverage.get("semantic_valid", False)), "source": rows[0]["source_provider"], "source_model": rows[0]["source_model"], "model_generation": rows[0].get("model_generation"), "source_transport": rows[0]["source_transport"], "retrieved_at": now.isoformat(), "source_run_time": source_run_time, "run_time_basis": rows[0].get("run_time_basis", "retrieval_time"), "coverage": coverage, "fallback_used": True, "reason": "complete fresh real source cycle" if fresh else "complete real source cycle exceeds its model-cycle freshness window", "latency_seconds": round(time.monotonic() - started, 3)}
         return rows, state
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         logging.warning("provider=%s attempt=fallback failure=%s", model, error)
-    state = {"status": "UNAVAILABLE", "fresh": False, "complete": False, "finite": False, "source": None, "source_model": None, "source_transport": None, "retrieved_at": now.isoformat(), "source_run_time": None, "run_time_basis": "retrieval_time", "coverage": {}, "fallback_used": True, "reason": error or "provider failed", "latency_seconds": round(time.monotonic() - started, 3)}
+    state = {"status": "INVALID" if error and "semantic_valid=False" in error else "UNAVAILABLE", "fresh": False, "complete": False, "finite": False, "semantic_valid": False, "source": None, "source_model": None, "source_transport": None, "retrieved_at": now.isoformat(), "source_run_time": None, "run_time_basis": "retrieval_time", "coverage": {}, "fallback_used": True, "reason": error or "provider failed", "latency_seconds": round(time.monotonic() - started, 3)}
     return [], state
 
 

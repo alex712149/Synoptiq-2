@@ -73,6 +73,9 @@ def decode_zone_means(model: str, grib_bytes: bytes) -> dict:
                 t2m_c=float(tsub["t2m"].mean()) - 273.15,
                 wind_ms=float(wind.mean()),
                 tp_cum_m=float(psub["tp"].mean()),
+                tp_native_unit="kg m**-2",
+                tp_step_type="accum",
+                tp_semantics="cumulative total precipitation since forecast start",
             )
         return out
     finally:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from app.pipeline import run_blend_pipeline
 from app.schemas import SystemStatusResponse
 
 router = APIRouter(prefix="/api/v1", tags=["Synoptiq API v1"])
+logger = logging.getLogger(__name__)
 
 PUBLIC_REGION = {
     "KWG": "kerala_western_ghats",
@@ -197,6 +199,16 @@ def _blend_public(db: Session, region_code: str, variable: str, lead_hours: int,
         n_sources_expected=len(MODELS),
         context_features=None,
     )
+    if abs(float(result.blended_value_raw)) > 1000 or (
+        abs(float(result.blended_value_raw)) > 10
+        and abs(float(result.blended_value_calibrated)) < abs(float(result.blended_value_raw)) * 0.1
+    ):
+        logger.warning(
+            "live calibration correction is extreme: region=%s variable=%s lead=%s raw=%s calibrated=%s final=%s sources=%s",
+            region_code, variable, lead_hours, result.blended_value_raw,
+            result.blended_value_calibrated, result.blended_value_calibrated,
+            [(source["model"], source["forecast_value"]) for source in sources],
+        )
 
     context_row = db.query(ForecastRow).filter(
         ForecastRow.region == internal,
@@ -394,6 +406,8 @@ def system_status(db: Session = Depends(get_db)):
                 "run_time_basis": state.get("run_time_basis"),
                 "coverage": state.get("coverage", {}),
                 "fallback_used": bool(state.get("fallback_used", False)),
+                "semantic_valid": bool(state.get("semantic_valid", False)),
+                "semantic_reason": state.get("coverage", {}).get("semantic_reason"),
                 "age_minutes": live_age_minutes,
                 "reason": "fresh validated real provider cycle" if fresh else state.get("reason", "live cycle is stale"),
             })

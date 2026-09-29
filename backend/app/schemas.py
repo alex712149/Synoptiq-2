@@ -120,6 +120,8 @@ class ProviderStatusResponse(BaseModel):
     fresh: bool = False
     complete: bool = False
     finite: bool = False
+    semantic_valid: bool = False
+    semantic_reason: Optional[str] = None
     source: Optional[str] = None
     source_model: Optional[str] = None
     source_transport: Optional[str] = None

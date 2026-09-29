@@ -98,3 +98,21 @@ This is the correct behavior for a demo-ready system built around authentic real
 ## Final verdict
 
 The application is connected to authentic real provider data, reports the actual AIFS model run, includes AIFS in the operational blend, restores held-out verification from its validated manifest version, and keeps route failures explicit. The persistent launcher is `scripts/start_synoptiq_live.ps1`; it uses only the repository `.venv` and starts the backend, periodic live refresh, and frontend as detached processes.
+
+## METRIC PRESENTATION FIXES
+
+- Confidence decay comes from `/api/v1/weights/map.confidence_decay`, normalized from real per-lead blend trust. The verified live series is 40.1%, 37.7%, 35.3%, 32.9%, and 30.5% for +24h through +120h.
+- The confidence chart renders a real Area path, five circular points, a 50% guide, exact tooltip percentages, min/max, and a selected current-lead weight summary.
+- Verification headlines select positive finite REAL_12M improvements. The current best is +52.7% KWG temperature RMSE; rainfall CSI remains measured 0.0% in the detailed matrix because that is the artifact result.
+- Verification preserves `null` as unavailable and `0` as a measured value. The scorecard reports 9 rows and 460 held-out contexts per score.
+- Extreme guidance keeps the real calibrated precipitation probability and uses forecast-derived deterministic states for temperature/wind when no event calibrator exists.
+- Isotonic event artifacts provide probabilities; quantile maps are not treated as event-probability artifacts.
+
+## LIVE DATA INTEGRITY FIX
+
+- Official ECMWF GRIB inspection proved `tp` is Total Precipitation, `kg m**-2`, `stepType=accum`, cumulative since forecast start.
+- The former `*1000` conversion was removed. Live ECMWF precipitation now uses a 24-hour cumulative difference with `1 kg m^-2 = 1 mm`.
+- Semantic gates reject wrong units, invalid accumulation metadata, duplicate/incomplete rows, non-finite values, future-invalid rows, and implausible physical ranges before persistence or blending.
+- AIFS is only LIVE after semantic validation. The corrected cycle reports official ECMWF Open Data, AIFS Single v2, run `2026-09-29T00:00:00Z`, 45 rows, and semantic_valid=true.
+- Fresh KWG +72h evidence: GFS 5.97, IFS 3.27, AIFS 6.60 mm/24h; weights 0.3707/0.3421/0.2872; raw blend 5.23; calibrated/final 4.15.
+- The literal `6597.7` appears only in the integrity report's root-cause explanation and the intentional outlier-rejection test; it is not a live source value or REAL-mode fixture.
