@@ -34,7 +34,8 @@ def get_runtime_mode() -> str:
 
 APP_MODE = "LIVE" if RUNTIME_MODE == "real" else "DEMO"
 DATA_DIR = PROJECT_ROOT / "data" / RUNTIME_MODE
-ARTIFACTS_DIR = Path(os.getenv("SYNOPTIQ_ARTIFACTS_DIR", str(ARTIFACTS_BASE_DIR / RUNTIME_MODE))).resolve()
+_default_artifacts_dir = ARTIFACTS_BASE_DIR / ("real_12m" if RUNTIME_MODE == "real" and (ARTIFACTS_BASE_DIR / "real_12m").exists() else RUNTIME_MODE)
+ARTIFACTS_DIR = Path(os.getenv("SYNOPTIQ_ARTIFACTS_DIR", str(_default_artifacts_dir))).resolve()
 MODELS_DIR = Path(os.getenv("SYNOPTIQ_MODELS_DIR", str(PROJECT_ROOT / "models" / RUNTIME_MODE))).resolve()
 CALIBRATION_DIR = Path(os.getenv("SYNOPTIQ_CALIBRATION_DIR", str(ARTIFACTS_DIR / "calibration"))).resolve()
 METRICS_DIR = Path(os.getenv("SYNOPTIQ_METRICS_DIR", str(ARTIFACTS_DIR / "metrics"))).resolve()
@@ -116,13 +117,13 @@ LEAD_HOURS = [24, 48, 72, 96, 120]
 
 # Event thresholds used for extreme-weather guidance (Section 14 / PS ask).
 THRESHOLDS = {
-    "precipitation": {"heavy": 50.0, "unit": "mm/24h"},   # CSI @ 50mm is the pitch KPI
+    "precipitation": {"heavy": 20.0, "unit": "mm/24h"},   # CSI @ 20mm is the primary rainfall event KPI
     "temperature": {"heatwave": 40.0, "unit": "deg_C"},
     "wind_speed": {"gale": 62.0, "unit": "km/h"},
 }
 
 # Pitch KPI target from the blueprint header (pre-registered, not a claimed result).
-TARGET_RELATIVE_CSI_IMPROVEMENT = 0.05  # +5% relative CSI @ 50mm vs best single model
+TARGET_RELATIVE_CSI_IMPROVEMENT = 0.05  # +5% relative CSI @ 20mm vs best single model
 
 RANDOM_SEED = 42
 

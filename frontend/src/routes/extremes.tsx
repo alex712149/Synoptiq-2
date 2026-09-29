@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import { zodValidator } from "@tanstack/zod-adapter";
 import { CloudRain, Flame, Wind, ShieldCheck, ShieldQuestion } from "lucide-react";
@@ -25,17 +25,28 @@ export const Route = createFileRoute("/extremes")({
 const icons = { precipitation: CloudRain, temperature: Flame, wind_speed: Wind };
 const formatProbability = (value: number) =>
   value > 0 && value < 0.005 ? "<1%" : `${Math.round(value * 100)}%`;
+const formatMeasurement = (value: number, unit: string) => {
+  const displayUnit: Record<string, string> = {
+    deg_C: "°C",
+    "mm/24h": "mm / 24h",
+    "km/h": "km/h",
+  };
+  return `${value.toFixed(1)} ${displayUnit[unit] ?? unit}`;
+};
 function Page() {
   const s = Route.useSearch(),
     nav = Route.useNavigate();
-  const { data: leads } = useSuspenseQuery(leadTimesQuery);
-  const { data: systemStatus } = useSuspenseQuery(systemStatusQuery);
-  const { data: r } = useQuery({
+  const leadsQuery = useQuery(leadTimesQuery);
+  const statusQuery = useQuery(systemStatusQuery);
+  const systemStatus = statusQuery.data;
+  const extremesQueryResult = useQuery({
     ...extremesQuery(s.region, s.lead),
-    enabled: APP_DATA_MODE === "mock" || systemStatus.ready,
+    enabled: APP_DATA_MODE === "mock" || systemStatus?.ready === true,
   });
+  const r = extremesQueryResult.data;
+  const leads = leadsQuery.data ?? [24, 48, 72, 96, 120];
   const guidance = Array.isArray(r?.guidance) ? r.guidance : [];
-  const liveUnavailable = APP_DATA_MODE === "live" && !systemStatus.ready;
+  const liveUnavailable = APP_DATA_MODE === "live" && !systemStatus?.ready;
   const set = (p: Partial<typeof s>) => nav({ to: ".", search: (q) => ({ ...q, ...p }) });
   return (
     <>
@@ -62,8 +73,29 @@ function Page() {
         </div>
         {liveUnavailable ? (
           <div className="page-state" role="status">
-            <h2>REAL INPUTS UNAVAILABLE</h2>
-            <p>Extreme guidance is withheld until current real provider inputs pass validation.</p>
+            <h2>{statusQuery.isPending ? "CHECKING REAL INPUTS" : "REAL INPUTS UNAVAILABLE"}</h2>
+            <p>
+              {statusQuery.error instanceof Error
+                ? statusQuery.error.message
+                : "Extreme guidance is withheld until current real provider inputs pass validation."}
+            </p>
+            {statusQuery.isError && (
+              <button type="button" onClick={() => void statusQuery.refetch()}>
+                Retry status check
+              </button>
+            )}
+          </div>
+        ) : extremesQueryResult.isError ? (
+          <div className="page-state" role="alert">
+            <h2>GUIDANCE UNAVAILABLE</h2>
+            <p>
+              {extremesQueryResult.error instanceof Error
+                ? extremesQueryResult.error.message
+                : "The real extreme-guidance API could not be reached."}
+            </p>
+            <button type="button" onClick={() => void extremesQueryResult.refetch()}>
+              Retry guidance
+            </button>
           </div>
         ) : (
         <div className="threat-grid">
@@ -73,28 +105,61 @@ function Page() {
             </div>
           ) : (
             guidance.map((g) => {
-              const Icon = icons[g.variable],
-                pct = g.probability == null ? null : Math.round(g.probability * 100),
-                level = pct == null ? "low" : pct >= 65 ? "high" : pct >= 35 ? "medium" : "low";
+              const Icon = icons[g.variable];
+              const calibrated = g.calibrated
+                && g.probability !== null
+                && Number.isFinite(g.probability);
+              const ratio = g.threshold > 0 ? g.forecast_value / g.threshold : null;
+              const thresholdState = g.threshold_exceeded
+                ? "THRESHOLD EXCEEDED"
+                : ratio !== null && ratio >= 0.9
+                  ? "NEAR THRESHOLD"
+                  : "WITHIN THRESHOLD";
+              const level = calibrated
+                ? g.probability! >= 0.65
+                  ? "calibrated-high"
+                  : g.probability! >= 0.35
+                    ? "calibrated-medium"
+                    : "calibrated-low"
+                : g.threshold_exceeded
+                  ? "exceeded"
+                  : thresholdState === "NEAR THRESHOLD"
+                    ? "near"
+                    : "within";
               return (
                 <section className={`threat panel ${level}`} key={g.variable}>
                   <div className="threat-icon">
                     <Icon />
                   </div>
                   <span className="kicker">{g.variable.replace("_", " ")}</span>
-                  <h2>{g.calibrated && g.probability != null ? formatProbability(g.probability) : "PROBABILITY UNAVAILABLE"}</h2>
-                  <p>
-                    Forecast: {g.forecast_value.toFixed(1)} {g.unit} · Threshold: {g.threshold} {g.unit}
-                  </p>
-                  <p>Threshold exceedance: {g.threshold_exceeded ? "YES" : "NO"}</p>
-                  {g.calibrated && g.probability != null && (
+                  <h2 className="threat-value">
+                    {calibrated
+                      ? formatProbability(g.probability!)
+                      : formatMeasurement(g.forecast_value, g.unit)}
+                  </h2>
+                  <strong className="threat-state">
+                    {thresholdState}
+                  </strong>
+                  <div className="threat-metrics">
+                    <span>Forecast: {formatMeasurement(g.forecast_value, g.unit)}</span>
+                    <span>Threshold: {formatMeasurement(g.threshold, g.unit)}</span>
+                    <span>Threshold exceedance: {g.threshold_exceeded ? "YES" : "NO"}</span>
+                  </div>
+                  {calibrated && (
                     <div className="threat-gauge">
-                      <i style={{ transform: `rotate(${g.probability * 180 - 90}deg)` }} />
+                      <i style={{ transform: `rotate(${g.probability! * 180 - 90}deg)` }} />
                     </div>
                   )}
-                  <div className={`calibration ${g.calibrated ? "yes" : "no"}`}>
-                    {g.calibrated ? <ShieldCheck /> : <ShieldQuestion />}
-                    {g.calibrated ? "CALIBRATED · REAL MODEL" : "CALIBRATION NOT AVAILABLE"}
+                  <div className={`calibration ${calibrated ? "yes" : "no"}`}>
+                    {calibrated ? <ShieldCheck /> : <ShieldQuestion />}
+                    {calibrated ? (
+                      <span>CALIBRATED · REAL MODEL</span>
+                    ) : (
+                      <span className="calibration-state">
+                        <span>CALIBRATION NOT AVAILABLE</span>
+                        <small>DETERMINISTIC GUIDANCE</small>
+                      </span>
+                    )}
                   </div>
                 </section>
               );

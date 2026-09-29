@@ -79,8 +79,12 @@ export interface BlendResponse {
 }
 export interface WeightMapPoint {
   lead_hours: number;
-  weights: Record<ModelName, number>;
+  weights: Partial<Record<ModelName, number | null>>;
   trust_score: number;
+}
+export interface ConfidenceDecayPoint {
+  lead_hours: number;
+  trust: number;
 }
 export interface WeightMapResponse {
   region: RegionCode;
@@ -88,6 +92,7 @@ export interface WeightMapResponse {
   regime: Regime;
   season: Season;
   points: WeightMapPoint[];
+  confidence_decay: ConfidenceDecayPoint[];
 }
 export interface VerificationSummary {
   region: RegionCode;
@@ -95,11 +100,12 @@ export interface VerificationSummary {
   metric: string;
   threshold: number | null;
   best_single_model: ModelName | string;
-  best_single_model_score: number;
-  synoptiq_score: number;
-  relative_improvement: number;
+  best_single_model_score: number | null;
+  synoptiq_score: number | null;
+  relative_improvement: number | null;
   meets_target: boolean | null;
   target_relative_improvement: number | null;
+  test_contexts?: number | null;
   best_single_model_csi?: number | null;
   synoptiq_csi?: number | null;
   relative_csi_improvement?: number | null;
@@ -180,6 +186,7 @@ export interface SystemStatusResponse {
   ready: boolean;
   live_state?: "REAL LIVE" | "DEGRADED REAL" | "REAL INPUTS UNAVAILABLE";
   active_model_version: string | null;
+  test_period?: { start: string; end: string } | null;
   last_successful_ingestion_time: string | null;
   providers: Record<ModelName, ProviderStatus>;
 }

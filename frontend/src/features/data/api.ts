@@ -29,7 +29,9 @@ import type {
 } from "./types";
 import { z } from "zod";
 
-export const API_BASE_URL = import.meta.env["VITE_API_BASE_URL"] ?? "/api/v1";
+export const API_BASE_URL = import.meta.env.DEV
+  ? "/api/v1"
+  : (import.meta.env["VITE_API_BASE_URL"] ?? "/api/v1");
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -76,11 +78,12 @@ const verificationRowsSchema = z.array(
     metric: z.string(),
     threshold: z.number().nullable(),
     best_single_model: z.string(),
-    best_single_model_score: z.number(),
-    synoptiq_score: z.number(),
-    relative_improvement: z.number(),
+    best_single_model_score: z.number().nullable(),
+    synoptiq_score: z.number().nullable(),
+    relative_improvement: z.number().nullable(),
     meets_target: z.boolean().nullable(),
     target_relative_improvement: z.number().nullable(),
+    test_contexts: z.number().int().nullable().optional(),
     best_single_model_csi: z.number().nullable().optional(),
     synoptiq_csi: z.number().nullable().optional(),
     relative_csi_improvement: z.number().nullable().optional(),
@@ -136,8 +139,16 @@ export const fixtureApi = {
   leadTimes: async () => mockLeadTimes,
   sources: async () => mockSources,
   blend: async (r: RegionCode, v: VariableName, l: number) => mockBlend(r, v, l),
-  weights: async (r: RegionCode, v: VariableName, s: Season, g: Regime) =>
-    mockWeightMap(r, v, s, g),
+  weights: async (r: RegionCode, v: VariableName, s: Season, g: Regime) => {
+    const response = mockWeightMap(r, v, s, g);
+    return {
+      ...response,
+      confidence_decay: response.points.map(({ lead_hours, trust_score }) => ({
+        lead_hours,
+        trust: trust_score,
+      })),
+    };
+  },
   verification: async () => mockVerification,
   extremes: async (r: RegionCode, l: number) => mockExtreme(r, l),
   replayEvents: async () => mockReplaySummaries,

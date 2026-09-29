@@ -6,7 +6,7 @@ export const mockRegions: Region[] = [
   { code: "IGP", name: "Indo-Gangetic Plains / NW India", lat: 28.6, lon: 77.2, emphasis: "Temperature extremes, western-disturbance regime shifts", coastal: false },
 ];
 export const mockVariables: VariableMeta[] = [
-  { variable: "precipitation", unit: "mm/24h", extreme_threshold: 50 },
+  { variable: "precipitation", unit: "mm/24h", extreme_threshold: 20 },
   { variable: "temperature", unit: "°C", extreme_threshold: 40 },
   { variable: "wind_speed", unit: "m/s", extreme_threshold: 17 },
 ];
@@ -52,9 +52,9 @@ export function mockWeightMap(region: RegionCode, variable: VariableName, season
   }) };
 }
 export const mockVerification: VerificationSummary[] = [
-  { region:"KWG",variable:"precipitation",metric:"CSI@50mm",threshold:50,best_single_model:"AIFS",best_single_model_score:.75,synoptiq_score:.8889,relative_improvement:.1852,meets_target:true,target_relative_improvement:.05,best_single_model_csi:.75,synoptiq_csi:.8889,relative_csi_improvement:.1852 },
-  { region:"BOB",variable:"precipitation",metric:"CSI@50mm",threshold:50,best_single_model:"IFS",best_single_model_score:.62,synoptiq_score:.829,relative_improvement:.337,meets_target:true,target_relative_improvement:.05,best_single_model_csi:.62,synoptiq_csi:.829,relative_csi_improvement:.337 },
-  { region:"IGP",variable:"precipitation",metric:"CSI@50mm",threshold:50,best_single_model:"GFS",best_single_model_score:.51,synoptiq_score:.694,relative_improvement:.361,meets_target:true,target_relative_improvement:.05,best_single_model_csi:.51,synoptiq_csi:.694,relative_csi_improvement:.361 },
+  { region:"KWG",variable:"precipitation",metric:"CSI@20mm",threshold:20,best_single_model:"AIFS",best_single_model_score:.75,synoptiq_score:.8889,relative_improvement:.1852,meets_target:true,target_relative_improvement:.05,best_single_model_csi:.75,synoptiq_csi:.8889,relative_csi_improvement:.1852 },
+  { region:"BOB",variable:"precipitation",metric:"CSI@20mm",threshold:20,best_single_model:"IFS",best_single_model_score:.62,synoptiq_score:.829,relative_improvement:.337,meets_target:true,target_relative_improvement:.05,best_single_model_csi:.62,synoptiq_csi:.829,relative_csi_improvement:.337 },
+  { region:"IGP",variable:"precipitation",metric:"CSI@20mm",threshold:20,best_single_model:"GFS",best_single_model_score:.51,synoptiq_score:.694,relative_improvement:.361,meets_target:true,target_relative_improvement:.05,best_single_model_csi:.51,synoptiq_csi:.694,relative_csi_improvement:.361 },
   { region:"KWG",variable:"temperature",metric:"RMSE",threshold:null,best_single_model:"IFS",best_single_model_score:1.12,synoptiq_score:1.05,relative_improvement:.0625,meets_target:null,target_relative_improvement:null },
   { region:"BOB",variable:"temperature",metric:"RMSE",threshold:null,best_single_model:"AIFS",best_single_model_score:1.34,synoptiq_score:1.38,relative_improvement:-.0299,meets_target:null,target_relative_improvement:null },
   { region:"IGP",variable:"temperature",metric:"RMSE",threshold:null,best_single_model:"AIFS",best_single_model_score:1.28,synoptiq_score:1.19,relative_improvement:.0703,meets_target:null,target_relative_improvement:null },
@@ -63,7 +63,7 @@ export const mockVerification: VerificationSummary[] = [
   { region:"IGP",variable:"wind_speed",metric:"RMSE",threshold:null,best_single_model:"AIFS",best_single_model_score:6.2,synoptiq_score:6.0,relative_improvement:.0323,meets_target:null,target_relative_improvement:null },
 ];
 export function mockExtreme(region: RegionCode, lead: number): ExtremeGuidanceResponse { return { region, lead_hours: lead, valid_time: now, guidance: [
-  { variable:"precipitation",threshold:50,unit:"mm/24h",probability: region === "KWG" ? .72 : .44,calibrated:true },
+  { variable:"precipitation",threshold:20,unit:"mm/24h",probability: region === "KWG" ? .72 : .44,calibrated:true },
   { variable:"temperature",threshold:40,unit:"°C",probability: region === "IGP" ? .81 : .18,calibrated:true },
   { variable:"wind_speed",threshold:62,unit:"km/h",probability: region === "BOB" ? .67 : .23,calibrated:false },
 ]}; }

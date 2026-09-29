@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { routeHead } from "@/features/shared/RouteMeta";
-import { APP_DATA_MODE, verificationQuery } from "@/features/data/queries";
+import { APP_DATA_MODE, systemStatusQuery, verificationQuery } from "@/features/data/queries";
 import "./landing.css";
 
 const Globe = lazy(() => import("@/features/landing/WeatherGlobe"));
@@ -34,17 +34,34 @@ const models = ["GFS", "IFS", "AIFS"] as const;
 
 function Page() {
   const verification = useQuery(verificationQuery);
-  const precipitation = Array.isArray(verification.data)
-    ? verification.data.filter((r) => r.variable === "precipitation")
-    : [];
-  const strongest = [...precipitation].sort(
-    (a, b) => b.relative_improvement - a.relative_improvement,
-  )[0];
-  const second = [...precipitation].sort(
-    (a, b) => b.relative_improvement - a.relative_improvement,
-  )[1];
+  const systemStatus = useQuery(systemStatusQuery);
+  const sourceModels = models.map((name) => {
+    const provider = systemStatus.data?.providers[name];
+    const label =
+      APP_DATA_MODE === "mock"
+        ? "DEMO SOURCE"
+        : provider
+          ? provider.status === "LIVE" && provider.is_real
+            ? "LIVE SOURCE"
+            : provider.status
+          : systemStatus.isError
+            ? "API UNAVAILABLE"
+            : "CHECKING";
+    return { name, label, status: label === "LIVE SOURCE" ? "live" : "unavailable" };
+  });
+  const realRows = Array.isArray(verification.data) ? verification.data : [];
+  const positiveImprovements = realRows
+    .filter(
+      (row) => row.relative_improvement !== null
+        && Number.isFinite(row.relative_improvement)
+        && row.relative_improvement > 0,
+    )
+    .sort((a, b) => b.relative_improvement! - a.relative_improvement!);
+  const strongest = positiveImprovements[0];
+  const second = positiveImprovements[1];
+  const verifiedRegionCount = new Set(realRows.map((row) => row.region)).size;
   const hasLiveVerification =
-    verification.isSuccess && APP_DATA_MODE === "live" && precipitation.length > 0;
+    verification.isSuccess && APP_DATA_MODE === "live" && realRows.length > 0;
 
   return (
     <div className="landing">
@@ -127,17 +144,18 @@ function Page() {
           </p>
         </div>
         <div className="disagreement-viz">
-          {models.map((name, i) => (
+          {sourceModels.map((model, i) => (
             <motion.div
-              key={name}
+              key={model.name}
+              className={model.status}
               initial={{ x: i === 0 ? -70 : i === 2 ? 70 : 0, opacity: 0 }}
               whileInView={{ x: 0, opacity: 1 }}
               viewport={{ once: true }}
               transition={{ duration: 0.7, delay: i * 0.12 }}
             >
-              <span>{name}</span>
+              <span>{model.name}</span>
               <i />
-              <b>SOURCE</b>
+              <b>{model.label}</b>
             </motion.div>
           ))}
           <div className="truth-plane">VERIFIED STATE</div>
@@ -148,10 +166,15 @@ function Page() {
         <div className="convergence">
           <div className="radar-ring r1" />
           <div className="radar-ring r2" />
-          {models.map((name, i) => (
-            <div key={name} className={`signal-node n${i + 1}`}>
-              <span>{name}</span>
+          {sourceModels.map((model, i) => (
+            <div
+              key={model.name}
+              className={`signal-node n${i + 1} ${model.status}`}
+              aria-label={`${model.name} ${model.label}`}
+            >
+              <span>{model.name}</span>
               <i />
+              <small>{model.label}</small>
             </div>
           ))}
           <div className="blend-core">
@@ -238,20 +261,24 @@ function Page() {
             <>
               <div className="proof-win">
                 <b>
-                  {strongest
-                    ? `${strongest.relative_improvement >= 0 ? "+" : ""}${(strongest.relative_improvement * 100).toFixed(1)}%`
-                    : "—"}
+                  {strongest ? `${(strongest.relative_improvement! * 100).toFixed(1)}%` : verifiedRegionCount}
                 </b>
-                <span>{strongest?.region} · rainfall CSI</span>
+                <span>
+                  {strongest
+                    ? `${strongest.region} · ${strongest.variable.replace("_", " ")} ${strongest.metric}`
+                    : "regions evaluated"}
+                </span>
                 <CheckCircle2 />
               </div>
               <div className="proof-win">
                 <b>
-                  {second
-                    ? `${second.relative_improvement >= 0 ? "+" : ""}${(second.relative_improvement * 100).toFixed(1)}%`
-                    : "—"}
+                  {second ? `${(second.relative_improvement! * 100).toFixed(1)}%` : realRows.length}
                 </b>
-                <span>{second?.region} · rainfall CSI</span>
+                <span>
+                  {second
+                    ? `${second.region} · ${second.variable.replace("_", " ")} ${second.metric}`
+                    : "real scorecard rows"}
+                </span>
                 <CheckCircle2 />
               </div>
               <div className="proof-honest">

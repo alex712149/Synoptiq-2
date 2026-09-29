@@ -76,12 +76,62 @@ def _fallback_rows(model: str, retrieved_at: datetime) -> list[dict]:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     if model == "GFS":
         import fetch_gfs
-        raw = fetch_gfs.fetch_cycle(retrieved_at.strftime("%Y-%m-%d"), (retrieved_at.hour // 6) * 6, list(range(6, 145, 6)))
+        raw = fetch_gfs.fetch_cycle(
+            retrieved_at.strftime("%Y-%m-%d"),
+            (retrieved_at.hour // 6) * 6,
+            list(range(6, 145, 6)),
+        )
         return _aggregate_archive_rows(model, raw, retrieved_at, "NOAA/AWS", "noaa-gfs-bdp-pds")
+
     import fetch_ecmwf
-    source_name = "ECMWF Open Data AWS"
-    raw = fetch_ecmwf.fetch_cycle(MODELS[model][0], retrieved_at.strftime("%Y-%m-%d"), (retrieved_at.hour // 6) * 6, list(range(6, 145, 6)))
-    return _aggregate_archive_rows(model, raw, retrieved_at, source_name, "ecmwf-forecasts-s3")
+    cycle_hours = 12 if model == "AIFS" else 6
+    latest_cycle = retrieved_at.replace(
+        hour=(retrieved_at.hour // cycle_hours) * cycle_hours,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    steps = list(range(6, 175, 6)) if model == "AIFS" else list(range(6, 145, 6))
+    last_error = None
+    for offset in range(8):
+        cycle = latest_cycle - timedelta(hours=cycle_hours * offset)
+        retry_delays = (0, 5, 10, 20, 30) if model == "AIFS" else (0,)
+        for retry_index, delay in enumerate(retry_delays):
+            if delay:
+                time.sleep(delay)
+            try:
+                raw = fetch_ecmwf.fetch_cycle(
+                    MODELS[model][0], cycle.strftime("%Y-%m-%d"), cycle.hour,
+                    steps, maximum_retries=1,
+                )
+            except Exception as exc:
+                last_error = exc
+                logging.warning(
+                    "provider=%s source=ECMWF cycle=%s attempt=%s failure=%s",
+                    model, cycle.isoformat(), retry_index + 1, type(exc).__name__,
+                )
+                message = str(exc).lower()
+                retryable = any(
+                    marker in message for marker in ("503", "slowdown", "slow down", "timeout")
+                )
+                if model == "AIFS" and retryable and retry_index + 1 < len(retry_delays):
+                    continue
+                break
+            if raw:
+                try:
+                    return _aggregate_archive_rows(
+                        model, raw, retrieved_at, "ECMWF Open Data", "ECMWF Open Data"
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    logging.warning(
+                        "provider=%s source=ECMWF cycle=%s invalid=%s: %s",
+                        model, cycle.isoformat(), type(exc).__name__, exc,
+                    )
+            break
+    if last_error:
+        raise RuntimeError(f"No published ECMWF {model} cycle was usable") from last_error
+    raise RuntimeError(f"No published ECMWF {model} cycle returned forecast rows")
 
 
 def _aggregate_archive_rows(model: str, raw_rows: list[dict], retrieved_at: datetime, provider: str, transport: str) -> list[dict]:
@@ -90,39 +140,72 @@ def _aggregate_archive_rows(model: str, raw_rows: list[dict], retrieved_at: date
     frame = pd.DataFrame(raw_rows)
     if frame.empty:
         raise RuntimeError("fallback returned no rows")
+    source_runs = frame[["run_date", "run_hour"]].drop_duplicates()
+    if len(source_runs) != 1:
+        raise RuntimeError("fallback returned rows from multiple source cycles")
+    source_run = source_runs.iloc[0]
+    cycle_time = datetime.strptime(
+        f"{source_run['run_date']} {int(source_run['run_hour']):02d}", "%Y-%m-%d %H"
+    ).replace(tzinfo=timezone.utc)
+    generations = frame.get("model_generation", pd.Series(dtype=str)).dropna().astype(str).unique()
+    if len(generations) > 1:
+        raise RuntimeError("fallback returned rows from multiple model generations")
+    generation = generations[0] if len(generations) else MODELS[model][1]
+    source_model = "AIFS Single" if model == "AIFS" else MODELS[model][1]
+    if model == "AIFS" and generation != "AIFS Single v2":
+        raise RuntimeError(f"fallback returned unexpected AIFS generation: {generation}")
     rows = []
     for zone, group in frame.groupby("zone"):
         indexed = group.set_index("step")
         for lead in LEADS:
-            steps = [lead + offset for offset in (0, 6, 12, 18)]
-            if any(step not in indexed.index for step in steps):
-                raise RuntimeError(f"fallback missing {zone} lead {lead}")
-            subset = indexed.loc[steps]
-            if model == "GFS":
-                precip_steps = [lead + offset for offset in (6, 12, 18, 24)]
-                if any(step not in indexed.index for step in precip_steps):
-                    raise RuntimeError(f"fallback missing {zone} precipitation lead {lead}")
-                precipitation = float(indexed.loc[precip_steps, "apcp6_mm"].clip(lower=0).sum())
+            if model == "AIFS":
+                valid_time = retrieved_at + timedelta(hours=lead)
+                source_offset = (valid_time - cycle_time).total_seconds() / 3600
+                temperatures = [
+                    _interpolate_step(indexed, "t2m_c", source_offset + offset)
+                    for offset in (0, 6, 12, 18)
+                ]
+                winds = [
+                    _interpolate_step(indexed, "wind_ms", source_offset + offset)
+                    for offset in (0, 6, 12, 18)
+                ]
+                precipitation_start = _interpolate_step(indexed, "tp_cum_m", source_offset)
+                precipitation_end = _interpolate_step(indexed, "tp_cum_m", source_offset + 24)
+                temperature_value = float(np.mean(temperatures))
+                wind_value = max(winds) * 3.6
+                precipitation = max(0.0, precipitation_end - precipitation_start) * 1000.0
             else:
-                if lead + 24 not in indexed.index:
-                    raise RuntimeError(f"fallback missing {zone} cumulative precipitation lead {lead}")
-                precipitation = max(0.0, float(indexed.loc[lead + 24, "tp_cum_m"] - indexed.loc[lead, "tp_cum_m"]) * 1000.0)
-            valid_time = retrieved_at + timedelta(hours=lead)
+                steps = [lead + offset for offset in (0, 6, 12, 18)]
+                if any(step not in indexed.index for step in steps):
+                    raise RuntimeError(f"fallback missing {zone} lead {lead}")
+                subset = indexed.loc[steps]
+                temperature_value = float(subset["t2m_c"].mean())
+                wind_value = float(subset["wind_ms"].max()) * 3.6
+                if model == "GFS":
+                    precip_steps = [lead + offset for offset in (6, 12, 18, 24)]
+                    if any(step not in indexed.index for step in precip_steps):
+                        raise RuntimeError(f"fallback missing {zone} precipitation lead {lead}")
+                    precipitation = float(indexed.loc[precip_steps, "apcp6_mm"].clip(lower=0).sum())
+                else:
+                    if lead + 24 not in indexed.index:
+                        raise RuntimeError(f"fallback missing {zone} cumulative precipitation lead {lead}")
+                    precipitation = max(0.0, float(indexed.loc[lead + 24, "tp_cum_m"] - indexed.loc[lead, "tp_cum_m"]) * 1000.0)
+                valid_time = cycle_time + timedelta(hours=lead)
             common = {
                 "model": model, "region": zone, "valid_time": valid_time.replace(tzinfo=None),
-                "lead_hours": lead, "run_time": retrieved_at.replace(tzinfo=None),
-                "model_generation": f"live:{MODELS[model][1]}", "season": _season(valid_time.month),
+                "lead_hours": lead, "run_time": cycle_time.replace(tzinfo=None),
+                "model_generation": f"live:{generation}", "season": _season(valid_time.month),
                 "regime": "normal", "regime_probs": None,
                 "lat": float(np.mean([point[0] for point in REPRESENTATIVE_POINTS[zone]])),
                 "lon": float(np.mean([point[1] for point in REPRESENTATIVE_POINTS[zone]])),
                 "retrieved_at_utc": retrieved_at.isoformat(), "source_provider": provider,
-                "source_model": MODELS[model][1], "source_transport": transport,
-                "source_run_time": None, "run_time_basis": "retrieval_time",
+                "source_model": source_model, "source_transport": transport,
+                "source_run_time": cycle_time.isoformat(), "run_time_basis": "model_run_time",
             }
             rows.extend([
-                {**common, "variable": "temperature", "forecast_value": float(subset["t2m_c"].mean())},
+                {**common, "variable": "temperature", "forecast_value": temperature_value},
                 {**common, "variable": "precipitation", "forecast_value": precipitation},
-                {**common, "variable": "wind_speed", "forecast_value": float(subset["wind_ms"].max()) * 3.6},
+                {**common, "variable": "wind_speed", "forecast_value": wind_value},
             ])
     return rows
 
@@ -136,6 +219,18 @@ def _season(month: int) -> str:
         return "post_monsoon"
     return "winter"
 
+
+def _interpolate_step(indexed: pd.DataFrame, field: str, target_hour: float) -> float:
+    lower_step = int(target_hour // 6) * 6
+    upper_step = lower_step if target_hour == lower_step else lower_step + 6
+    if lower_step not in indexed.index or upper_step not in indexed.index:
+        raise RuntimeError(f"ECMWF cycle does not cover source offset {target_hour:g}h")
+    lower_value = float(indexed.loc[lower_step, field])
+    if upper_step == lower_step:
+        return lower_value
+    upper_value = float(indexed.loc[upper_step, field])
+    fraction = (target_hour - lower_step) / (upper_step - lower_step)
+    return lower_value + fraction * (upper_value - lower_value)
 
 def validate_rows(model: str, rows: list[dict], now: datetime) -> dict:
     frame = pd.DataFrame(rows)
@@ -166,10 +261,19 @@ def fetch_provider(model: str, now: datetime) -> tuple[list[dict], dict]:
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             logging.warning("provider=%s attempt=primary-%s failure=%s", model, attempt + 1, error)
+            if "returned non-finite values" in error:
+                break
     try:
         rows = _fallback_rows(model, now)
         coverage = validate_rows(model, rows, now)
-        state = {"status": "LIVE", "fresh": True, "complete": True, "finite": True, "source": rows[0]["source_provider"], "source_model": rows[0]["source_model"], "source_transport": rows[0]["source_transport"], "retrieved_at": now.isoformat(), "source_run_time": None, "run_time_basis": "retrieval_time", "coverage": coverage, "fallback_used": True, "reason": "complete future real fallback cycle", "latency_seconds": round(time.monotonic() - started, 3)}
+        source_run_time = rows[0].get("source_run_time")
+        source_age = (
+            now - datetime.fromisoformat(source_run_time).astimezone(timezone.utc)
+            if source_run_time else timedelta(0)
+        )
+        max_source_age = timedelta(hours={"GFS": 10, "IFS": 14, "AIFS": 20}[model])
+        fresh = timedelta(0) <= source_age <= max_source_age
+        state = {"status": "LIVE" if fresh else "STALE", "fresh": fresh, "complete": True, "finite": True, "source": rows[0]["source_provider"], "source_model": rows[0]["source_model"], "model_generation": rows[0].get("model_generation"), "source_transport": rows[0]["source_transport"], "retrieved_at": now.isoformat(), "source_run_time": source_run_time, "run_time_basis": rows[0].get("run_time_basis", "retrieval_time"), "coverage": coverage, "fallback_used": True, "reason": "complete fresh real source cycle" if fresh else "complete real source cycle exceeds its model-cycle freshness window", "latency_seconds": round(time.monotonic() - started, 3)}
         return rows, state
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -191,8 +295,6 @@ def persist_cycle(provider_rows: dict[str, list[dict]], states: dict[str, dict],
     temporary = LIVE_DIR / "live_manifest.json.tmp"
     temporary.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     temporary.replace(LIVE_DIR / "live_manifest.json")
-    if sum(bool(rows) for rows in provider_rows.values()) < 2:
-        return
     db = SessionLocal()
     db.query(ForecastRow).filter(ForecastRow.model_generation.like("live:%")).delete(synchronize_session=False)
     db.query(LiveForecast).delete(synchronize_session=False)

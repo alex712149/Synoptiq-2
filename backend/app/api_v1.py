@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.config import (ACTIVE_METRICS_DIR, ACTIVE_MODEL_VERSION, CALIBRATION_DIR, LEAD_HOURS,
                         MANIFEST_PATH, MODELS, MODELS_DIR, PILOT_ZONES, RUNTIME_MODE,
-                        THRESHOLDS, VARIABLES, LIVE_FRESHNESS_MINUTES)
+                        THRESHOLDS, VARIABLES, LIVE_FRESHNESS_MINUTES,
+                        TARGET_RELATIVE_CSI_IMPROVEMENT)
 from app.database import get_db
 from app.models_db import ForecastRow, GroundTruthRow, LiveForecast
 from app.pipeline import run_blend_pipeline
@@ -30,8 +32,28 @@ REGION_LABELS = {
 }
 COASTAL = {"KWG": True, "BOB": True, "IGP": False}
 UNITS = {"precipitation": "mm/24h", "temperature": "deg_C", "wind_speed": "km/h"}
-MODEL_CYCLE_HOURS = {"GFS": 6, "IFS": 6, "AIFS": 6}
+MODEL_CYCLE_HOURS = {"GFS": 6, "IFS": 6, "AIFS": 12}
 MODEL_PUBLISH_GRACE_HOURS = {"GFS": 4, "IFS": 8, "AIFS": 8}
+
+
+def _optional_metric(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        metric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return metric if math.isfinite(metric) else None
+
+
+def _confidence_decay(points: list[dict]) -> list[dict[str, float | int]]:
+    series = []
+    for point in points:
+        trust = _optional_metric(point.get("trust_score"))
+        lead_hours = point.get("lead_hours")
+        if trust is not None and isinstance(lead_hours, int):
+            series.append({"lead_hours": lead_hours, "trust": trust})
+    return series
 
 
 def _internal_region(code: str) -> str:
@@ -281,6 +303,7 @@ def system_status(db: Session = Depends(get_db)):
     providers = {}
     for model, latest_run_row in latest_by_model.items():
         latest_run = latest_run_row[0] if latest_run_row else None
+        latest_available = None
         latest_run_utc = (
             latest_run.replace(tzinfo=timezone.utc)
             if latest_run and latest_run.tzinfo is None
@@ -330,7 +353,7 @@ def system_status(db: Session = Depends(get_db)):
             "status": status,
             "validation_result": validation,
             "run_time": latest_run_utc.isoformat() if latest_run_utc else None,
-            "latest_available_time": latest_available.isoformat() if latest_run is not None and latest_available else None,
+            "latest_available_time": latest_available.isoformat() if latest_available else None,
             "age_minutes": max(0, int((now - latest_run_utc.replace(tzinfo=None)).total_seconds() / 60)) if latest_run_utc else None,
             "validation_reason": reason,
             "timestamp": latest_run_utc.isoformat() if latest_run_utc else None,
@@ -479,13 +502,22 @@ def weights_map(region: str, variable: str, season: str, regime: str,
             continue
         points.append({
             "lead_hours": lead,
-            "weights": {s["model"]: float(s["weight"] or 0.0) for s in data["sources"]},
+            "weights": {
+                s["model"]: _optional_metric(s["weight"])
+                for s in data["sources"]
+            },
             "trust_score": data["trust"]["trust_score"],
         })
     if not points:
         raise HTTPException(404, "No forecast contexts match the requested season/regime.")
-    return {"region": region, "variable": variable, "regime": regime,
-            "season": season, "points": points}
+    return {
+        "region": region,
+        "variable": variable,
+        "regime": regime,
+        "season": season,
+        "points": points,
+        "confidence_decay": _confidence_decay(points),
+    }
 
 
 @router.get("/skill/verification")
@@ -503,31 +535,47 @@ def verification(region: str | None = None, variable: str | None = None):
             continue
         if variable and var != variable:
             continue
+        contexts = payload.get("n_test_contexts")
+        try:
+            test_contexts = int(contexts) if contexts is not None else None
+        except (TypeError, ValueError):
+            test_contexts = None
 
         if var == "precipitation":
-            best = float(payload.get("best_single_model_csi", 0.0))
-            skill = float(payload.get("synoptiq_csi", 0.0))
-            rel = float(payload.get("relative_csi_improvement_pct", 0.0)) / 100.0
-            threshold_key = next(k for k in THRESHOLDS[var] if k != "unit")
+            best = _optional_metric(payload.get("best_single_model_csi"))
+            skill = _optional_metric(payload.get("synoptiq_csi"))
+            rel_pct = _optional_metric(payload.get("relative_csi_improvement_pct"))
+            rel = rel_pct / 100.0 if rel_pct is not None else None
+            metric = str(payload.get("metric", ""))
+            metric_threshold = re.search(r"CSI@\s*(\d+(?:\.\d+)?)\s*mm", metric, re.IGNORECASE)
+            threshold = (
+                float(metric_threshold.group(1))
+                if metric_threshold
+                else payload.get("threshold")
+            )
             rows.append({
                 "region": public,
                 "variable": var,
-                "metric": payload.get("metric", f"CSI@{THRESHOLDS[var][threshold_key]:g}mm"),
-                "threshold": THRESHOLDS[var][threshold_key],
+                "metric": metric or (f"CSI@{float(threshold):g}mm" if threshold is not None else "CSI"),
+                "threshold": float(threshold) if threshold is not None else None,
                 "best_single_model": payload.get("best_single_model", "unknown"),
                 "best_single_model_score": best,
                 "synoptiq_score": skill,
                 "relative_improvement": rel,
-                "meets_target": rel >= 0.05,
-                "target_relative_improvement": 0.05,
+                "meets_target": (
+                    rel >= TARGET_RELATIVE_CSI_IMPROVEMENT if rel is not None else None
+                ),
+                "target_relative_improvement": TARGET_RELATIVE_CSI_IMPROVEMENT,
                 "best_single_model_csi": best,
                 "synoptiq_csi": skill,
                 "relative_csi_improvement": rel,
+                "test_contexts": test_contexts,
             })
         else:
-            best = float(payload.get("best_single_model_rmse", 0.0))
-            skill = float(payload.get("synoptiq_rmse", 0.0))
-            rel = float(payload.get("relative_rmse_improvement_pct", 0.0)) / 100.0
+            best = _optional_metric(payload.get("best_single_model_rmse"))
+            skill = _optional_metric(payload.get("synoptiq_rmse"))
+            rel_pct = _optional_metric(payload.get("relative_rmse_improvement_pct"))
+            rel = rel_pct / 100.0 if rel_pct is not None else None
             rows.append({
                 "region": public,
                 "variable": var,
@@ -542,6 +590,7 @@ def verification(region: str | None = None, variable: str | None = None):
                 "best_single_model_csi": None,
                 "synoptiq_csi": None,
                 "relative_csi_improvement": None,
+                "test_contexts": test_contexts,
             })
     return rows
 
@@ -563,7 +612,7 @@ def extreme_guidance(region: str, lead_hours: int, db: Session = Depends(get_db)
         threshold_key = next(k for k in THRESHOLDS[variable] if k != "unit")
         calibration_dir = CALIBRATION_DIR
         calibrated = (
-            len(data["sources"]) == len(MODELS)
+            len(data.get("sources", [])) == len(MODELS)
             and (
                 (calibration_dir / f"iso_{variable}_{threshold_key}.joblib").exists()
                 or (calibration_dir / f"iso_{variable}_{threshold_key}_{internal}.joblib").exists()
@@ -617,8 +666,74 @@ def replay_event(event_id: str, db: Session = Depends(get_db)):
     if not e:
         raise HTTPException(404, f"Replay event '{event_id}' not found")
     payload = dict(e.payload or {})
+    payload.setdefault("event_id", e.event_id)
     payload["region"] = _public_region(payload.get("region", e.region))
     payload.setdefault("variable", e.variable)
     payload.setdefault("valid_time", e.valid_time.isoformat())
     payload.setdefault("label", e.label)
+    payload.setdefault("headline", payload["label"] or "Historical replay case")
+    payload.setdefault("unit", UNITS.get(e.variable, ""))
+
+    observed = payload.get("reference_value", payload.get("observed_value"))
+    if observed is not None and math.isfinite(float(observed)):
+        payload["reference_value"] = float(observed)
+
+    raw_sources = payload.get("raw_sources")
+    if not isinstance(raw_sources, list):
+        raw_sources = []
+    normalized_sources = []
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        normalized = dict(source)
+        normalized.setdefault("weight", normalized.get("model_weight"))
+        normalized_sources.append(normalized)
+    payload["raw_sources"] = normalized_sources
+
+    if "naive_average" not in payload and normalized_sources:
+        source_values = [float(source["forecast_value"]) for source in normalized_sources]
+        payload["naive_average"] = sum(source_values) / len(source_values)
+
+    choice = payload.get("single_model_choice")
+    if not isinstance(choice, dict):
+        eligible_sources = [
+            source for source in normalized_sources
+            if source.get("historical_skill") is not None
+            and math.isfinite(float(source["historical_skill"]))
+            and source.get("forecast_value") is not None
+            and math.isfinite(float(source["forecast_value"]))
+        ]
+        if eligible_sources:
+            best_source = max(eligible_sources, key=lambda source: float(source["historical_skill"]))
+            choice = {
+                "model": best_source["model"],
+                "forecast_value": float(best_source["forecast_value"]),
+            }
+            payload["single_model_choice"] = choice
+
+    if payload.get("reference_value") is not None:
+        reference = float(payload["reference_value"])
+        blended_value = payload.get(
+            "synoptiq_blend",
+            payload.get("blended_value_calibrated", payload.get("blended_value_raw")),
+        )
+        if blended_value is not None and math.isfinite(float(blended_value)):
+            payload["synoptiq_blend"] = float(blended_value)
+            payload.setdefault("synoptiq_error", abs(float(blended_value) - reference))
+        if choice and choice.get("forecast_value") is not None:
+            payload.setdefault(
+                "single_model_error",
+                abs(float(choice["forecast_value"]) - reference),
+            )
+        if payload.get("naive_average") is not None:
+            payload.setdefault(
+                "naive_average_error",
+                abs(float(payload["naive_average"]) - reference),
+            )
+
+    narrative = payload.get("narrative")
+    if isinstance(narrative, str):
+        payload["narrative"] = [narrative]
+    elif not isinstance(narrative, list):
+        payload["narrative"] = []
     return payload

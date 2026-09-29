@@ -44,18 +44,29 @@ function Page() {
     );
   }
   const d = replay.data;
-  const miss = d.synoptiq_error > d.single_model_error;
+  const singleModel =
+    d.single_model_choice && typeof d.single_model_choice === "object"
+      ? d.single_model_choice
+      : { model: "Unavailable", forecast_value: Number.NaN };
+  const safeSources = Array.isArray(d.raw_sources) ? d.raw_sources : [];
+  const miss = Number.isFinite(d.synoptiq_error) && Number.isFinite(d.single_model_error)
+    ? d.synoptiq_error > d.single_model_error
+    : false;
   const vals = [
-    { name: "Naive average", value: d.naive_average, error: d.naive_average_error },
+    { name: "Naive average", value: Number.isFinite(d.naive_average) ? d.naive_average : 0, error: Number.isFinite(d.naive_average_error) ? d.naive_average_error : 0 },
     {
-      name: `Single · ${d.single_model_choice.model}`,
-      value: d.single_model_choice.forecast_value,
-      error: d.single_model_error,
+      name: `Single · ${singleModel.model ?? "Unavailable"}`,
+      value: Number.isFinite(singleModel.forecast_value) ? singleModel.forecast_value : Number.isFinite(d.naive_average) ? d.naive_average : 0,
+      error: Number.isFinite(d.single_model_error) ? d.single_model_error : Number.isFinite(d.naive_average_error) ? d.naive_average_error : 0,
     },
-    { name: "Synoptiq", value: d.synoptiq_blend, error: d.synoptiq_error },
+    { name: "Synoptiq", value: Number.isFinite(d.synoptiq_blend) ? d.synoptiq_blend : 0, error: Number.isFinite(d.synoptiq_error) ? d.synoptiq_error : 0 },
   ];
-  const min = Math.min(...vals.map((v) => v.value), d.reference_value) * 0.9,
-    max = Math.max(...vals.map((v) => v.value), d.reference_value) * 1.07;
+  const numericValues = vals.map((v) => Number(v.value) || 0);
+  const referenceValue = Number.isFinite(d.reference_value) ? d.reference_value : 0;
+  const min = Math.min(...numericValues, referenceValue) * 0.9,
+    max = Math.max(...numericValues, referenceValue) * 1.07;
+  const chartRange = max - min || 1;
+  const narrative = Array.isArray(d.narrative) ? d.narrative : [];
   return (
     <>
       <TopBar mode={APP_DATA_MODE} />
@@ -83,13 +94,13 @@ function Page() {
             <Target />
             <span>VERIFIED TRUTH</span>
             <strong>
-              {d.reference_value.toFixed(1)} {d.unit}
+              {referenceValue.toFixed(1)} {d.unit}
             </strong>
           </div>
           <div className="race-track">
             <div
               className="truth-line"
-              style={{ left: `${((d.reference_value - min) / (max - min)) * 100}%` }}
+              style={{ left: `${((referenceValue - min) / chartRange) * 100}%` }}
             />
             {vals.map((v, i) => (
               <div className="race-row" key={v.name}>
@@ -97,31 +108,31 @@ function Page() {
                 <div className="race-line">
                   <motion.i
                     initial={{ width: 0 }}
-                    animate={{ width: `${((v.value - min) / (max - min)) * 100}%` }}
+                    animate={{ width: `${((v.value - min) / chartRange) * 100}%` }}
                     transition={{ duration: 1, delay: i * 0.35, ease: "easeOut" }}
                   />
-                  <b style={{ left: `${((v.value - min) / (max - min)) * 100}%` }}>
+                  <b style={{ left: `${((v.value - min) / chartRange) * 100}%` }}>
                     {v.value.toFixed(1)}
                   </b>
                 </div>
                 <strong className={v.name === "Synoptiq" ? "accent" : ""}>
-                  {v.error.toFixed(1)} error
+                  {Number(v.error || 0).toFixed(1)} error
                 </strong>
               </div>
             ))}
           </div>
           <div className="raw-sources">
-            {d.raw_sources.map((s) => (
-              <span key={s.model}>
-                <b>{s.model}</b>
-                {s.forecast_value.toFixed(1)} {d.unit}
+            {safeSources.map((s) => (
+              <span key={`${d.event_id}-${s.model ?? "source"}`}>
+                <b>{s.model ?? "SOURCE"}</b>
+                {Number.isFinite(s.forecast_value) ? s.forecast_value.toFixed(1) : "—"} {d.unit}
               </span>
             ))}
           </div>
         </section>
         <section className="commentary">
           <span className="kicker">MISSION COMMENTARY</span>
-          {d.narrative.map((n, i) => (
+          {narrative.map((n, i) => (
             <motion.div
               key={n}
               initial={{ opacity: 0, x: -20 }}

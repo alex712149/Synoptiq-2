@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import { zodValidator } from "@tanstack/zod-adapter";
 import {
@@ -7,7 +7,7 @@ import {
   AreaChart,
   CartesianGrid,
   Legend,
-  Line,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -27,6 +27,7 @@ const schema = z.object({
   regime: z
     .enum(["active_monsoon", "break_monsoon", "western_disturbance", "depression", "normal"])
     .catch("active_monsoon"),
+  lead: z.coerce.number().catch(72),
 });
 export const Route = createFileRoute("/weights")({
   validateSearch: zodValidator(schema),
@@ -44,34 +45,51 @@ function Page() {
   const s = Route.useSearch(),
     nav = Route.useNavigate();
   const set = (p: Partial<typeof s>) => nav({ to: ".", search: (q) => ({ ...q, ...p }) });
-  const { data: systemStatus } = useSuspenseQuery(systemStatusQuery);
-  const { data: r } = useQuery({
+  const statusQuery = useQuery(systemStatusQuery);
+  const systemStatus = statusQuery.data;
+  const weightsResult = useQuery({
     ...weightsQuery(s.region, s.variable, s.season, s.regime),
-    enabled: APP_DATA_MODE === "mock" || systemStatus.ready,
+    enabled: APP_DATA_MODE === "mock" || systemStatus?.ready === true,
   });
+  const r = weightsResult.data;
   const points = Array.isArray(r?.points) ? r.points : [];
+  const decay = Array.isArray(r?.confidence_decay) ? r.confidence_decay : [];
   const availableModels = APP_DATA_MODE === "mock"
     ? [...modelNames]
     : modelNames.filter((model) => {
-        const provider = systemStatus.providers[model];
-        return provider.status === "LIVE" && provider.is_real;
+        const provider = systemStatus?.providers[model];
+        return provider?.status === "LIVE" && provider.is_real;
       });
-  const data = points.map((p) => ({
+  const weightData = points.map((p) => ({
     lead: `+${p.lead_hours}h`,
     ...p.weights,
-    trust: +(p.trust_score * 100).toFixed(1),
   }));
-  const completeSeries = [24, 48, 72, 96, 120].every((lead) => {
+  const confidenceData = decay.map((point) => ({
+    lead: `+${point.lead_hours}h`,
+    lead_hours: point.lead_hours,
+    trust: point.trust * 100,
+  }));
+  const expectedLeads = [24, 48, 72, 96, 120];
+  const completeWeights = expectedLeads.every((lead) => {
     const point = points.find((item) => item.lead_hours === lead);
-    if (!point || !Number.isFinite(point.trust_score)) return false;
+    if (!point) return false;
     const weights = Object.values(point.weights);
     const weightModels = Object.keys(point.weights);
     return weights.length === availableModels.length
-      && availableModels.every((model) => Number.isFinite(point.weights[model]))
+      && weights.every((weight) => typeof weight === "number" && Number.isFinite(weight))
+      && availableModels.every((model) => typeof point.weights[model] === "number" && Number.isFinite(point.weights[model]))
       && weightModels.every((model) => availableModels.includes(model as (typeof modelNames)[number]))
-      && Math.abs(weights.reduce((sum, weight) => sum + weight, 0) - 1) <= 0.02;
+      && Math.abs(weights.reduce((sum, weight) => sum + (typeof weight === "number" ? weight : 0), 0) - 1) <= 0.02;
   });
-  const inputsUnavailable = APP_DATA_MODE === "live" && !systemStatus.ready;
+  const completeConfidence = expectedLeads.every((lead) => {
+    const point = decay.find((item) => item.lead_hours === lead);
+    return !!point && Number.isFinite(point.trust) && point.trust >= 0 && point.trust <= 1;
+  });
+  const inputsUnavailable = APP_DATA_MODE === "live" && !systemStatus?.ready;
+  const selectedWeights = points.find((point) => point.lead_hours === s.lead)?.weights;
+  const confidenceValues = confidenceData.map((point) => point.trust);
+  const minTrust = confidenceValues.length ? Math.min(...confidenceValues) : null;
+  const maxTrust = confidenceValues.length ? Math.max(...confidenceValues) : null;
   return (
     <>
       <TopBar mode={APP_DATA_MODE} />
@@ -82,7 +100,7 @@ function Page() {
           copy="Watch the model hierarchy change as uncertainty accumulates across the supported forecast horizons."
           action={APP_DATA_MODE === "mock" ? <DataStatus mode={APP_DATA_MODE} /> : undefined}
         />
-        <div className="control-deck four">
+        <div className="control-deck five">
           <SelectControl
             label="Region"
             value={s.region}
@@ -110,18 +128,55 @@ function Page() {
             onChange={(v) => set({ regime: v as Regime })}
             options={regimes.map((v) => ({ value: v, label: v.replaceAll("_", " ") }))}
           />
+          <SelectControl
+            label="Current lead"
+            value={String(s.lead)}
+            onChange={(v) => set({ lead: Number(v) })}
+            options={expectedLeads.map((v) => ({ value: String(v), label: `+${v} hours` }))}
+          />
         </div>
-        {inputsUnavailable || !completeSeries ? (
+        {inputsUnavailable ? (
           <div className="page-state" role="status">
-            <h2>{inputsUnavailable ? "REAL INPUTS UNAVAILABLE" : "TRUST TRAJECTORY UNAVAILABLE"}</h2>
+            <h2>{statusQuery.isPending ? "CHECKING REAL INPUTS" : "REAL INPUTS UNAVAILABLE"}</h2>
             <p>
-              {inputsUnavailable
-                ? "No chart is shown because the latest source cycles are stale or have not passed validation."
-                : "Trust trajectory unavailable for this source/run."}
+              {statusQuery.error instanceof Error
+                ? statusQuery.error.message
+                : "No chart is shown because current real source cycles have not passed validation."}
             </p>
+            {statusQuery.isError && (
+              <button type="button" onClick={() => void statusQuery.refetch()}>
+                Retry status check
+              </button>
+            )}
           </div>
         ) : (
         <>
+        <section className="lead-weight-summary panel">
+          <div className="panel-head">
+            <div>
+              <span className="kicker">CURRENT LEAD</span>
+              <h2>+{s.lead}h source weights</h2>
+            </div>
+            <span className="chart-note">from the selected real blend context</span>
+          </div>
+          <div className="lead-weight-values">
+            {modelNames.map((model) => {
+              const weight = selectedWeights?.[model];
+              const value = typeof weight === "number" && Number.isFinite(weight)
+                ? `${(weight * 100).toFixed(1)}%`
+                : availableModels.includes(model)
+                  ? "NOT AVAILABLE"
+                  : "SOURCE UNAVAILABLE";
+              return (
+                <div key={model}>
+                  <span>{model}</span>
+                  <strong>{value}</strong>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+        {completeWeights ? (
         <section className="chart-panel panel">
           <div className="panel-head">
             <div>
@@ -134,7 +189,7 @@ function Page() {
           </div>
           <div className="big-chart">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data}>
+              <AreaChart data={weightData}>
                 <defs>
                   <linearGradient id="ifs" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0" stopColor="var(--chart-ifs)" stopOpacity=".38" />
@@ -149,6 +204,7 @@ function Page() {
                   stroke="var(--muted-foreground)"
                 />
                 <Tooltip
+                  formatter={(value) => typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "NOT AVAILABLE"}
                   contentStyle={{ background: "var(--popover)", borderColor: "var(--border)" }}
                 />
                 <Legend />
@@ -183,6 +239,17 @@ function Page() {
             </ResponsiveContainer>
           </div>
         </section>
+        ) : (
+          <div className="page-state" role={weightsResult.isError ? "alert" : "status"}>
+            <h2>{weightsResult.isPending ? "LOADING WEIGHTS" : "REAL WEIGHT SERIES NOT AVAILABLE"}</h2>
+            <p>
+              {weightsResult.error instanceof Error
+                ? weightsResult.error.message
+                : "The selected live blend did not return all five lead-time weight allocations."}
+            </p>
+          </div>
+        )}
+        {completeConfidence ? (
         <section className="chart-panel panel">
           <div className="panel-head">
             <div>
@@ -190,29 +257,51 @@ function Page() {
               <h2>Confidence decay</h2>
             </div>
             <strong className="delta">
-              {data[0]?.trust}% → {data.at(-1)?.trust}%
+              {confidenceData[0]?.trust.toFixed(1)}% → {confidenceData.at(-1)?.trust.toFixed(1)}%
             </strong>
+          </div>
+          <div className="trust-range">
+            <span>MIN {minTrust?.toFixed(1)}%</span>
+            <span>MAX {maxTrust?.toFixed(1)}%</span>
           </div>
           <div className="trust-chart">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data}>
+              <AreaChart data={confidenceData}>
+                <defs>
+                  <linearGradient id="trustArea" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0" stopColor="var(--primary)" stopOpacity=".28" />
+                    <stop offset="1" stopColor="var(--primary)" stopOpacity=".015" />
+                  </linearGradient>
+                </defs>
                 <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
                 <XAxis dataKey="lead" stroke="var(--muted-foreground)" />
-                <YAxis domain={[0, 100]} stroke="var(--muted-foreground)" />
+                <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} stroke="var(--muted-foreground)" />
                 <Tooltip
+                  formatter={(value) => typeof value === "number" ? `${value.toFixed(1)}%` : "NOT AVAILABLE"}
                   contentStyle={{ background: "var(--popover)", borderColor: "var(--border)" }}
                 />
-                <Line
+                <ReferenceLine y={50} stroke="var(--warning)" strokeDasharray="4 4" />
+                <Area
                   type="monotone"
                   dataKey="trust"
                   stroke="var(--primary)"
                   strokeWidth={3}
-                  dot={{ r: 4 }}
+                  fill="url(#trustArea)"
+                  dot={{ r: 4, fill: "var(--primary)" }}
+                  activeDot={{ r: 6 }}
                 />
               </AreaChart>
             </ResponsiveContainer>
           </div>
+          <p className="trust-explainer">Trust decreases as forecast horizon increases.</p>
         </section>
+        ) : (
+          <div className="page-state" role={weightsResult.isError ? "alert" : "status"}>
+            <h2>LIVE TRUST SERIES NOT AVAILABLE</h2>
+            <p>Current blend response does not expose lead-specific trust.</p>
+            {weightsResult.isError && weightsResult.error instanceof Error && <p>{weightsResult.error.message}</p>}
+          </div>
+        )}
         </>
         )}
       </div>

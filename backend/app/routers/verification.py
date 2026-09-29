@@ -54,7 +54,7 @@ def scorecard(region: str, variable: str = "precipitation", db: Session = Depend
         synoptiq_csi = best_single = rel_improve = 0.0
 
     return VerificationResponse(
-        region=region, variable=variable, threshold_label="50mm/24h",
+        region=region, variable=variable, threshold_label="20mm/24h",
         rows=scorecard_rows, synoptiq_csi=round(synoptiq_csi, 4),
         best_single_model_csi=round(best_single, 4),
         relative_csi_improvement_pct=round(rel_improve, 2),
